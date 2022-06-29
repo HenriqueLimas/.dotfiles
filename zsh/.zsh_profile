@@ -1,0 +1,47 @@
+VIM="nvim"
+export GIT_EDITOR=$VIM
+
+alias vim="nvim"
+alias vi="nvim"
+
+# GIT
+alias g="git"
+alias gad="git add"
+alias gcm="git commit -m"
+alias gco="git checkout"
+alias gcb="git checkout -b"
+alias gdf="git diff"
+alias gst="git status"
+alias gsh="git stash"
+alias gsa="git stash apply"
+alias gfh="git fetch"
+alias gp='git pull'
+alias gpl='gp origin `gcurrentbranch`'
+alias gph="git push origin head"
+alias gundo="git reset --soft HEAD^"
+alias gcount="git shortlog -sn"
+alias gcurrentbranch="git branch 2> /dev/null | sed -e '/^[^*]/d' -e 's/* \(.*\)/\1/'"
+
+alias ..="cd .."
+alias ...="cd ../.."
+
+alias chrome='open -a Google\ Chrome --args'
+
+alias kp="kill -9 $(lsof -i :8443 -t)"
+
+export PATH="$HOME/.yarn/bin:$PATH"
+export PATH="/Users/hlimas/Library/Python/2.7/bin/:$PATH"
+export PATH="/usr/local/lib/ruby/gems/2.5.0/bin:$PATH"
+export PATH="$HOME/.local/bin:$PATH"
+
+export GOPATH="$HOME/go"
+export PATH="$PATH:/usr/local/go/bin:$GOPATH/bin"
+
+bindkey -s ^f "tmux-sessionizer\n"
+
+# NVM
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm
+[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"  # This loads nvm bash_completion
+
+. "$HOME/.cargo/env"
