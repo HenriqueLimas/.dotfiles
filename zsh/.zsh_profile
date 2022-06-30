@@ -37,7 +37,7 @@ export PATH="$HOME/.local/bin:$PATH"
 export GOPATH="$HOME/go"
 export PATH="$PATH:/usr/local/go/bin:$GOPATH/bin"
 
-bindkey -s '^f' tmux-sessionizer
+bindkey -s '^f' "tmux-sessionizer\n"
 
 # NVM
 export NVM_DIR="$HOME/.nvm"
