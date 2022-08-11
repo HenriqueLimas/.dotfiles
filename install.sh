@@ -1,6 +1,6 @@
 #! /usr/bin/env bash
 
-folders="bin nvim tmux zsh"
+folders="bin nvim tmux zsh karabiner"
 
 for folder in $(echo $folders)
 do
