@@ -39,7 +39,7 @@ nnoremap <leader>cwm :call ColorMyPencils()<CR>
 nnoremap <leader>vwb :let g:hlimas_colorscheme =
 lua <<EOF
 require'nvim-treesitter.configs'.setup {
-    ensure_installed = "maintained",
+    ensure_installed = { 'javascript', 'css', 'go', 'rust', 'typescript', 'html', 'vim', 'scss', 'tsx', 'json', 'markdown', 'lua', 'graphql', 'make', 'python', 'yaml', 'vue', 'svelte' },
     highlight = {
         enable = true,
         additional_vim_regex_highlighting = false,
