@@ -1,2 +1,4 @@
 .DS_Store
 automatic_backups
+bin/.local/share
+bin/.local/state
