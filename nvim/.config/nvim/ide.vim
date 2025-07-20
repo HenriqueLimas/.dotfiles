@@ -63,5 +63,6 @@ source ~/.config/nvim/prettier.vim
 source ~/.config/nvim/syntastic.vim
 source ~/.config/nvim/telescope.vim
 source ~/.config/nvim/terminal.vim
+source ~/.config/nvim/vimspector.vim
 
 let g:markdown_fenced_languages = ['html', 'typescript', 'javascript' , 'typescriptreact', 'css', 'less']

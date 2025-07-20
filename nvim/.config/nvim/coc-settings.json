@@ -3,9 +3,9 @@
   "eslint.autoFixOnSave": true,
   "eslint.format.enable": true,
   "eslint.packageManager": "yarn",
-  "coc.preferences.formatOnSaveFiletypes": ["css", "typescript", "javascript", "less", "typescript.tsx"],
+  "coc.preferences.formatOnSaveFiletypes": ["css", "typescript", "javascript", "less", "typescript.tsx", "typescriptreact"],
   "prettier.requireConfig": true,
-  "typescript.format.enabled": true,
+  "javascript.preferences.importModuleSpecifier": "relative",
   "typescript.preferences.importModuleSpecifier": "relative",
   "languageserver": {
     "marko": {

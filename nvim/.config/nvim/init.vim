@@ -38,6 +38,12 @@ Plug 'christoomey/vim-tmux-navigator'
 Plug 'jeffkreeftmeijer/vim-numbertoggle'
 Plug 'jparise/vim-graphql'
 Plug 'ThePrimeagen/vim-be-good'
+Plug 'vim-scripts/pmd.vim'
+Plug 'puremourning/vimspector'
+Plug 'wakatime/vim-wakatime'
+Plug 'github/copilot.vim'
+Plug 'wuelnerdotexe/vim-astro'
+Plug 'pasky/claude.vim'
 
 " Fuzzy finder
 " Plug 'junegunn/fzf', { 'do': { -> fzf#install() } }

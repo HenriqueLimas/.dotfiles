@@ -1,2 +1,2 @@
 " Run lint on save
-autocmd BufWritePost,FileWritePost *.go execute 'Lint' | cwindow
+" autocmd BufWritePre *.go call go#lint#Run()
