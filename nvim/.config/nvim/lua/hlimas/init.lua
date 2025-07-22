@@ -1,1 +1,3 @@
-require("hlimas.telescope")
+require("hlimas.remap")
+require("hlimas.lazy")
+require("hlimas.set")
