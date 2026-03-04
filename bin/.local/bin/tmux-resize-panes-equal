@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+
+# dmux-style layout management using tmux layout strings
+# This applies the layout in a single atomic operation (no flickering)
+
+# Get window dimensions
+window_width=$(tmux display-message -p '#{window_width}')
+window_height=$(tmux display-message -p '#{window_height}')
+
+# Get all panes with their info
+panes_data=$(tmux list-panes -F '#{pane_id}|#{pane_top}|#{pane_height}|#{pane_index}')
+
+# Parse panes and identify layout structure
+declare -a side_panes
+declare -a side_pane_indices
+bottom_pane=""
+bottom_pane_height=0
+bottom_pane_index=""
+
+while IFS='|' read -r pane_id pane_top pane_height pane_index; do
+    pane_bottom=$((pane_top + pane_height))
+
+    # Bottom pane: reaches window bottom and doesn't start at top
+    if [ "$pane_bottom" -eq "$window_height" ] && [ "$pane_top" -gt 0 ]; then
+        bottom_pane="$pane_id"
+        bottom_pane_height="$pane_height"
+        bottom_pane_index="$pane_index"
+    else
+        side_panes+=("$pane_id")
+        side_pane_indices+=("$pane_index")
+    fi
+done <<< "$panes_data"
+
+num_side_panes=${#side_panes[@]}
+
+# Exit if nothing to balance
+if [ "$num_side_panes" -le 1 ] && [ -z "$bottom_pane" ]; then
+    exit 0
+fi
+
+# Calculate dimensions
+if [ -n "$bottom_pane" ]; then
+    available_height=$((window_height - bottom_pane_height - 1))  # -1 for border
+else
+    available_height=$window_height
+fi
+
+# Calculate equal width for side panes
+borders=$((num_side_panes - 1))
+available_width=$((window_width - borders))
+pane_width=$((available_width / num_side_panes))
+width_remainder=$((available_width % num_side_panes))
+
+# Build layout string components
+side_layout_parts=()
+x_pos=0
+
+for i in "${!side_panes[@]}"; do
+    pane_id="${side_panes[$i]}"
+    numeric_id="${pane_id#%}"
+
+    # Distribute remainder to first pane (dmux convention)
+    if [ "$i" -eq 0 ]; then
+        width=$((pane_width + width_remainder))
+    else
+        width=$pane_width
+    fi
+
+    # Format: WIDTHxHEIGHT,X,Y,PANE_INDEX
+    side_layout_parts+=("${width}x${available_height},${x_pos},0,${side_pane_indices[$i]}")
+    x_pos=$((x_pos + width + 1))  # +1 for border
+done
+
+# Construct final layout string
+if [ -n "$bottom_pane" ]; then
+    # Has bottom pane
+    bottom_y=$((available_height + 1))
+
+    if [ "$num_side_panes" -eq 1 ]; then
+        # Vertical split: top pane | bottom pane
+        layout="${window_width}x${window_height},0,0[${side_layout_parts[0]},${window_width}x${bottom_pane_height},0,${bottom_y},${bottom_pane_index}]"
+    else
+        # Horizontal split for side panes, then bottom pane
+        side_container=$(IFS=','; echo "${side_layout_parts[*]}")
+        layout="${window_width}x${window_height},0,0[${window_width}x${available_height},0,0{${side_container}},${window_width}x${bottom_pane_height},0,${bottom_y},${bottom_pane_index}]"
+    fi
+else
+    # No bottom pane - just side panes
+    if [ "$num_side_panes" -eq 1 ]; then
+        layout="${window_width}x${window_height},0,0,${side_pane_indices[0]}"
+    else
+        side_container=$(IFS=','; echo "${side_layout_parts[*]}")
+        layout="${window_width}x${window_height},0,0{${side_container}}"
+    fi
+fi
+
+# Apply layout (single atomic operation - no flicker)
+if ! tmux select-layout "$layout" 2>/dev/null; then
+    # Fallback to old method if layout string fails
+    exec /Users/hlimas/.local/bin/tmux-resize-panes-equal.backup
+fi

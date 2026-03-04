@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+
+# Use fzf to select directory from the same paths as tmux-sessionizer
+selected=$(find ~/ ~/Development/ebay ~/Development/github ~/Development/frontend-master -maxdepth 1 -mindepth 1 -type d | fzf)
+
+# Exit if no directory selected (user cancelled fzf)
+if [[ -z $selected ]]; then
+    exit 0
+fi
+
+selected_name=$(basename "$selected" | tr . _)
+tmux_running=$(pgrep tmux)
+
+# If tmux is not running at all, start a new session in the selected directory
+if [[ -z $TMUX ]] && [[ -z $tmux_running ]]; then
+    tmux new-session -s $selected_name -c "$selected" "claude"
+    exit 0
+fi
+
+# If we're not in a tmux session but tmux is running, attach to existing or create new
+if [[ -z $TMUX ]]; then
+    if ! tmux has-session -t=$selected_name 2> /dev/null; then
+        tmux new-session -ds $selected_name -c "$selected"
+    fi
+    tmux attach-session -t $selected_name
+    tmux send-keys "claude" C-m
+    exit 0
+fi
+
+# If we're already in a tmux session, check if a pane with this directory already exists
+existing_pane=$(tmux list-panes -s -F "#{pane_id} #{@claude_dir}" | grep "$selected$" | cut -d' ' -f1)
+
+if [[ -n $existing_pane ]]; then
+    # Switch to the existing pane
+    tmux select-pane -t "$existing_pane"
+else
+    # Get the leftmost pane (typically the first pane in the window)
+    # This ensures we always split from the same reference point
+    leftmost_pane=$(tmux list-panes -F "#{pane_id} #{pane_left}" | sort -k2 -n | head -1 | cut -d' ' -f1)
+
+    # Split using -f flag for full height split from the leftmost pane
+    # This creates a full-height vertical split instead of splitting the current pane
+    tmux split-window -h -f -t "$leftmost_pane" -c "$selected"
+    tmux set-option -p @claude_dir "$selected"
+    tmux send-keys "claude" C-m
+
+    # Resize all panes to have equal width
+    tmux-resize-panes-equal
+fi
