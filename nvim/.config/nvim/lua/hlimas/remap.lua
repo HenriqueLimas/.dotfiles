@@ -2,6 +2,7 @@ vim.g.mapleader = " "
 vim.keymap.set("n", "-", vim.cmd.Ex)
 
 vim.keymap.set("n", "gd", vim.lsp.buf.definition)
+vim.keymap.set("n", "grr", vim.lsp.buf.references)
 
 vim.keymap.set({ "n", "v" }, "<leader>y", [["+y]])
 vim.keymap.set("n", "<leader>Y", [["+Y]])

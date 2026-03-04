@@ -11,26 +11,25 @@ return {
 				save_on_toggle = true,
 			},
 			files = {},
-			terminal = {},
 		})
 
-		vim.keymap.set("n", "<leader>fa", function()
+		vim.keymap.set("n", "<leader>a", function()
 			harpoon:list("files"):add()
 		end)
-		vim.keymap.set("n", "<leader>fe", function()
+		vim.keymap.set("n", "<C-e>", function()
 			harpoon.ui:toggle_quick_menu(harpoon:list("files"))
 		end)
 
-		vim.keymap.set("n", "<leader>fh", function()
+		vim.keymap.set("n", "<leader>1", function()
 			harpoon:list("files"):select(1)
 		end)
-		vim.keymap.set("n", "<leader>fj", function()
+		vim.keymap.set("n", "<leader>2", function()
 			harpoon:list("files"):select(2)
 		end)
-		vim.keymap.set("n", "<leader>fk", function()
+		vim.keymap.set("n", "<leader>3", function()
 			harpoon:list("files"):select(3)
 		end)
-		vim.keymap.set("n", "<leader>fl", function()
+		vim.keymap.set("n", "<leader>4", function()
 			harpoon:list("files"):select(4)
 		end)
 
@@ -40,34 +39,6 @@ return {
 		end)
 		vim.keymap.set("n", "<C-S-N>", function()
 			harpoon:list("files"):next()
-		end)
-
-		-- TERMINAL
-		vim.keymap.set("n", "<leader>ta", function()
-			vim.cmd.term()
-			harpoon:list("terminal"):add()
-			local idx = harpoon:list("terminal"):length() - 1
-
-			local term_group = vim.api.nvim_create_augroup("TermGroup", { clear = true })
-
-			vim.api.nvim_create_autocmd("TermClose", {
-				group = term_group,
-				pattern = "term://*",
-				callback = function()
-					harpoon:list("terminal"):remove_at(idx)
-				end,
-			})
-		end)
-
-		vim.keymap.set("n", "<leader>te", function()
-			harpoon.ui:toggle_quick_menu(harpoon:list("terminal"))
-		end)
-
-		vim.keymap.set("n", "<leader>td", function()
-			harpoon:list("terminal"):select(1)
-		end)
-		vim.keymap.set("n", "<leader>tf", function()
-			harpoon:list("terminal"):select(2)
 		end)
 	end,
 }

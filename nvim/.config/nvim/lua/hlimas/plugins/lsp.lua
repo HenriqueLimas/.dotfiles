@@ -11,6 +11,8 @@ return {
 			"hrsh7th/cmp-path",
 			"hrsh7th/cmp-cmdline",
 			"hrsh7th/nvim-cmp",
+			"L3MON4D3/LuaSnip",
+			"saadparwaiz1/cmp_luasnip",
 		},
 
 		config = function()
@@ -22,6 +24,18 @@ return {
 				vim.lsp.protocol.make_client_capabilities(),
 				cmp_lsp.default_capabilities()
 			)
+
+			vim.filetype.add({ extension = { ["marko"] = "marko" } })
+			vim.lsp.config("marko_ls", {
+				handlers = {
+					function()
+						require("lspconfig").marko_ls.setup({
+							capabilities = capabilities,
+						})
+					end,
+				},
+			})
+			vim.lsp.enable("marko_ls")
 
 			require("mason-lspconfig").setup({
 				ensure_installed = {
@@ -59,6 +73,17 @@ return {
 				}, {
 					{ name = "buffer" },
 				}),
+			})
+
+			vim.diagnostic.config({
+				float = {
+					focusable = false,
+					style = "minimal",
+					border = "rounded",
+					source = "always",
+					header = "",
+					prefix = "",
+				},
 			})
 		end,
 	},
