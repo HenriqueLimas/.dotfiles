@@ -3,23 +3,27 @@
 # Resize all panes to equal width, respecting bottom pane if it exists
 
 # Get all panes with their info
-panes_data=$(tmux list-panes -F '#{pane_id}|#{pane_top}|#{pane_height}|#{pane_index}')
+panes_data=$(tmux list-panes -F '#{pane_id}|#{pane_top}|#{pane_height}|#{pane_left}|#{pane_width}')
 window_height=$(tmux display-message -p '#{window_height}')
 
 # Parse panes and identify layout structure
 declare -a side_panes
 bottom_pane=""
 bottom_pane_height=0
+bottom_pane_left=0
+bottom_pane_width=0
 
-while IFS='|' read -r pane_id pane_top pane_height pane_index; do
+while IFS='|' read -r pane_id pane_top pane_height pane_left pane_width; do
     pane_bottom=$((pane_top + pane_height))
 
     # Bottom pane: reaches window bottom and doesn't start at top
     if [ "$pane_bottom" -eq "$window_height" ] && [ "$pane_top" -gt 0 ]; then
         bottom_pane="$pane_id"
         bottom_pane_height="$pane_height"
+        bottom_pane_left="$pane_left"
+        bottom_pane_width="$pane_width"
     else
-        side_panes+=("$pane_id")
+        side_panes+=("$pane_id|$pane_left")
     fi
 done <<< "$panes_data"
 
@@ -32,15 +36,32 @@ fi
 
 # If there's a bottom pane, temporarily remove it, resize, then restore
 if [ -n "$bottom_pane" ]; then
+    # Find which side pane the bottom pane was under (by horizontal position)
+    target_pane=""
+    for pane_info in "${side_panes[@]}"; do
+        IFS='|' read -r pane_id pane_left <<< "$pane_info"
+        # Check if this side pane overlaps with the bottom pane horizontally
+        if [ "$pane_left" -eq "$bottom_pane_left" ]; then
+            target_pane="$pane_id"
+            break
+        fi
+    done
+
     # Select the bottom pane and break it into a new window
     tmux select-pane -t "$bottom_pane"
-    tmux break-pane -d
+    # Capture the window ID that break-pane creates
+    broken_window=$(tmux break-pane -d -P -F '#{window_id}')
 
     # Resize the remaining side panes equally
     tmux select-layout even-horizontal
 
-    # Bring back the bottom pane
-    tmux join-pane -v -l "$bottom_pane_height"
+    # Select the target pane (the one that had the bottom pane before)
+    if [ -n "$target_pane" ]; then
+        tmux select-pane -t "$target_pane"
+    fi
+
+    # Bring back the bottom pane from the specific window
+    tmux join-pane -v -l "$bottom_pane_height" -s "${broken_window}"
 else
     # No bottom pane, just resize all panes equally
     tmux select-layout even-horizontal
