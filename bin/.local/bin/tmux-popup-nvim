@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+
+# Get the current path passed as argument
+CURRENT_PATH="$1"
+
+# Create a session name based on the path
+# Replace slashes and special characters with underscores
+SESSION_NAME="popup-nvim-$(echo "$CURRENT_PATH" | sed 's/\//_/g' | sed 's/^_//' | sed 's/ /_/g')"
+
+# Log file for debugging
+LOG_FILE="/tmp/tmux-popup-nvim.log"
+echo "Starting tmux-popup-nvim at $(date)" >> "$LOG_FILE"
+echo "CURRENT_PATH: $CURRENT_PATH" >> "$LOG_FILE"
+echo "SESSION_NAME: $SESSION_NAME" >> "$LOG_FILE"
+
+# Check if session exists
+if ! tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+    echo "Creating new session" >> "$LOG_FILE"
+    tmux new-session -d -s "$SESSION_NAME" -c "$CURRENT_PATH" nvim 2>> "$LOG_FILE"
+else
+    echo "Session already exists" >> "$LOG_FILE"
+fi
+
+# Attach to the session (unset TMUX to avoid nesting issues)
+echo "Attempting to attach" >> "$LOG_FILE"
+TMUX= tmux attach-session -t "$SESSION_NAME" 2>> "$LOG_FILE"
+echo "Attach finished with exit code: $?" >> "$LOG_FILE"
