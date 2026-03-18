@@ -4,8 +4,8 @@
 CURRENT_PATH="$1"
 
 # Create a session name based on the path
-# Replace slashes and special characters with underscores
-SESSION_NAME="popup-nvim-$(echo "$CURRENT_PATH" | sed 's/\//_/g' | sed 's/^_//' | sed 's/ /_/g')"
+# Replace slashes, dots, and special characters with underscores
+SESSION_NAME="popup-nvim-$(echo "$CURRENT_PATH" | sed 's/\//_/g' | sed 's/^_//' | sed 's/ /_/g' | sed 's/\./_/g')"
 
 # Log file for debugging
 LOG_FILE="/tmp/tmux-popup-nvim.log"
