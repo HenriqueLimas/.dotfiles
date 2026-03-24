@@ -21,6 +21,9 @@ else
     echo "Session already exists" >> "$LOG_FILE"
 fi
 
+# Enable mouse in the inner session so scrolling works inside the popup
+TMUX= tmux set-option -t "$SESSION_NAME" mouse on 2>> "$LOG_FILE"
+
 # Attach to the session (unset TMUX to avoid nesting issues)
 echo "Attempting to attach" >> "$LOG_FILE"
 TMUX= tmux attach-session -t "$SESSION_NAME" 2>> "$LOG_FILE"
