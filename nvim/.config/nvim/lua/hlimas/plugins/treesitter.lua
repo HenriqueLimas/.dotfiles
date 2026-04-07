@@ -3,6 +3,16 @@ return {
 		"nvim-treesitter/nvim-treesitter",
 		build = ":TSUpdate",
 		config = function()
+			local parser_config = require("nvim-treesitter.parsers").get_parser_configs()
+			parser_config.marko = {
+				install_info = {
+					url = "/Users/hlimas/Development/github/marko-tmbundle/tree-sitter-marko",
+					files = { "src/parser.c" },
+					generate_requires_npm = true,
+				},
+				filetype = "marko",
+			}
+
 			local configs = require("nvim-treesitter.configs")
 			configs.setup({
 				ensure_installed = {
@@ -16,6 +26,7 @@ return {
 					"javascript",
 					"typescript",
 					"go",
+					"marko",
 				},
 
 				-- Install parsers synchronously (only applied to `ensure_installed`)
