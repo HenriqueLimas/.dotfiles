@@ -3,11 +3,6 @@ return {
 		"nvim-treesitter/nvim-treesitter",
 		build = ":TSUpdate",
 		config = function()
-			-- Get the parser configuration table
-			local parser_config = require("nvim-treesitter.parsers").get_parser_configs()
-
-			parser_config.html.filetype = { "marko", "html" }
-
 			local configs = require("nvim-treesitter.configs")
 			configs.setup({
 				ensure_installed = {
