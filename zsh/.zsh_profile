@@ -1,13 +1,14 @@
 VIM="nvim"
 export GIT_EDITOR=$VIM
 
-alias vim="nvim"
-alias vi="nvim"
+alias vim="node -v > /dev/null; nvim"
+alias vi="node -v > /dev/null; nvim"
 
 # GIT
 alias g="git"
 alias gad="git add"
 alias gcm="git commit -m"
+alias gcmappend="git commit --amend --no-edit"
 alias gco="git checkout"
 alias gcb="git checkout -b"
 alias gdf="git diff"
@@ -21,6 +22,9 @@ alias gph="git push origin head"
 alias gundo="git reset --soft HEAD^"
 alias gcount="git shortlog -sn"
 alias gcurrentbranch="git branch 2> /dev/null | sed -e '/^[^*]/d' -e 's/* \(.*\)/\1/'"
+alias gwa="git worktree add"
+alias gwl="git worktree list"
+alias gwr="git worktree remove"
 
 alias ..="cd .."
 alias ...="cd ../.."
@@ -29,6 +33,9 @@ alias chrome='open -a Google\ Chrome --args'
 
 alias kp="kill -9 $(lsof -i :8443 -t)"
 
+alias sshgithub="ssh-add --apple-use-keychain ~/.ssh/id_ed_public_github"
+bindkey -s '^f' "tmux-agent-pane\n"
+
 export PATH="$HOME/.yarn/bin:$PATH"
 export PATH="/Users/hlimas/Library/Python/2.7/bin/:$PATH"
 export PATH="/usr/local/lib/ruby/gems/2.5.0/bin:$PATH"
@@ -36,8 +43,6 @@ export PATH="$HOME/.local/bin:$PATH"
 
 export GOPATH="$HOME/go"
 export PATH="$PATH:/usr/local/go/bin:$GOPATH/bin"
-
-bindkey -s '^f' "tmux-sessionizer\n"
 
 # NVM
 export NVM_DIR="$HOME/.nvm"
