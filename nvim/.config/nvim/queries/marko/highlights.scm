@@ -1,6 +1,23 @@
 (doctype) @keyword
+(html_comment) @comment
 
 (scriptlet) @keyword
+
+(style_block_css) @keyword
+(style_block_less) @keyword
+(style_block_scss) @keyword
+(style_block_js) @keyword
+(style_block_ts) @keyword
+(script_block) @keyword
+
+(concise_tag) @tag
+(concise_attribute_group
+  ["[" "]"] @punctuation.bracket)
+(concise_terminator) @punctuation.delimiter
+(concise_fence_block
+  ["---" "---"] @punctuation.special)
+(concise_fence_line
+  ["--"] @punctuation.special)
 
 (placeholder
   ["${" "$!{" "}"] @punctuation.special)
@@ -16,7 +33,7 @@
 (tag_default_fragment) @expression
 (tag_parameters_fragment) @parameter
 (tag_arguments_fragment) @expression
-(tag_method_fragment) @expression
+(tag_method_block_fragment) @expression
 (tag_parameters
   ["|" "|"] @punctuation.delimiter)
 (tag_arguments
@@ -32,8 +49,16 @@
   ["(" ")"] @punctuation.delimiter)
 (attribute_method
   ["{" "}"] @punctuation.delimiter)
+(attribute_paren_value
+  ["(" ")"] @punctuation.delimiter)
+(attribute_bracket_value
+  ["[" "]"] @punctuation.bracket)
 (attribute_arguments_fragment) @expression
+(attribute_paren_fragment) @expression
+(attribute_bracket_fragment) @expression
 (attribute_method_fragment) @expression
+(attribute_method_nested_block
+  ["{" "}"] @punctuation.delimiter)
 (attribute_value_fragment) @expression
 
 [
@@ -48,3 +73,4 @@
 
 (top_level_statement) @none
 (text) @none
+
