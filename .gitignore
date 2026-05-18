@@ -2,3 +2,5 @@
 automatic_backups
 bin/.local/share
 bin/.local/state
+pi/.pi/agent/auth.json
+pi/.pi/agent/sessions/

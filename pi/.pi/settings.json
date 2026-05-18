@@ -1,0 +1,9 @@
+{
+  "lastChangelogVersion": "0.74.1",
+  "defaultProvider": "ebay",
+  "defaultModel": "claude-sonnet-4-6",
+  "defaultThinkingLevel": "medium",
+  "packages": [
+    "npm:pi-autoresearch"
+  ]
+}
