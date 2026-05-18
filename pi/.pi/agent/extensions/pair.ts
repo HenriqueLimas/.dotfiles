@@ -1,4 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { join } from "node:path";
+import { homedir } from "node:os";
 
 const PAIR_ENTRY_TYPE = "pair-mode";
 const WIDGET_KEY = "pair-mode";
@@ -74,6 +76,8 @@ Follow these principles:
 Your operating model is: you drive the implementation, I navigate and review. Optimize for transparency, small safe changes, verifiable behavior, and easy human review.
 `;
 
+const ALERT_SOUND = join(homedir(), ".pi/agent/sounds/metal-gear-codec.mp3");
+
 function buildWidget(): string[] {
   return [`👯‍♂️  Pair mode`];
 }
@@ -110,6 +114,12 @@ export default function pairExtension(pi: ExtensionAPI) {
         enable(last.data.description, ctx);
       }
     }
+  });
+
+  // Play Metal Gear alert sound when agent finishes and needs input
+  pi.on("agent_end", async (_event, ctx) => {
+    if (!enabled || !ctx.hasUI) return;
+    pi.exec("afplay", [ALERT_SOUND]).catch(() => {});
   });
 
   // Inject system prompt when pair mode is active
