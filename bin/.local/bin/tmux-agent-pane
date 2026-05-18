@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
 
 # Use fzf to select directory from the same paths as tmux-sessionizer
-selected=$(find ~/ ~/Development/ebay ~/Development/github ~/Development/frontend-master -maxdepth 1 -mindepth 1 -type d | fzf)
+selected=$(find ~/ ~/Development/ebay ~/Development/github -maxdepth 1 -mindepth 1 -type d | fzf)
 
 # Exit if no directory selected (user cancelled fzf)
 if [[ -z $selected ]]; then
     exit 0
 fi
 
+pi_cmd="pi --continue"
+
 selected_name=$(basename "$selected" | tr . _)
 tmux_running=$(pgrep tmux)
 
 # If tmux is not running at all, start a new session in the selected directory
 if [[ -z $TMUX ]] && [[ -z $tmux_running ]]; then
-    tmux new-session -s $selected_name -c "$selected" "pi"
+    tmux new-session -s $selected_name -c "$selected" "$pi_cmd"
     exit 0
 fi
 
@@ -23,7 +25,7 @@ if [[ -z $TMUX ]]; then
         tmux new-session -ds $selected_name -c "$selected"
     fi
     tmux attach-session -t $selected_name
-    tmux send-keys "pi" C-m
+    tmux send-keys "$pi_cmd" C-m
     exit 0
 fi
 
@@ -42,7 +44,7 @@ else
     # This creates a full-height vertical split instead of splitting the current pane
     tmux split-window -h -f -t "$leftmost_pane" -c "$selected"
     tmux set-option -p @agent_dir "$selected"
-    tmux send-keys "pi" C-m
+    tmux send-keys "$pi_cmd" C-m
 
     # Resize all panes to have equal width
     tmux-resize-panes-equal
