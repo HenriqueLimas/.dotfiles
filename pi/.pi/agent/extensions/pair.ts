@@ -74,8 +74,8 @@ Follow these principles:
 Your operating model is: you drive the implementation, I navigate and review. Optimize for transparency, small safe changes, verifiable behavior, and easy human review.
 `;
 
-function buildWidget(description: string): string[] {
-  return [`👯‍♂️  Pair mode — ${description}`];
+function buildWidget(): string[] {
+  return [`👯‍♂️  Pair mode`];
 }
 
 export default function pairExtension(pi: ExtensionAPI) {
@@ -85,7 +85,7 @@ export default function pairExtension(pi: ExtensionAPI) {
   function enable(desc: string, ctx: { ui: { setWidget: Function } }) {
     enabled = true;
     description = desc;
-    ctx.ui.setWidget(WIDGET_KEY, buildWidget(description));
+    ctx.ui.setWidget(WIDGET_KEY, buildWidget());
   }
 
   function disable(ctx: { ui: { setWidget: Function } }) {
@@ -148,12 +148,11 @@ export default function pairExtension(pi: ExtensionAPI) {
       const desc = input || "pair programming session";
       enable(desc, ctx);
       pi.appendEntry(PAIR_ENTRY_TYPE, { enabled: true, description: desc });
-      ctx.ui.notify(
-        input
-          ? `Pair mode on — ${desc}`
-          : `👯‍♂️ Pair mode on! I'll think out loud, propose before acting, and we'll decide together when we're done. What are we working on?`,
-        "info"
-      );
+      if (input) {
+        pi.sendUserMessage(`We just started a pair programming session. We are working on: ${desc}. Acknowledge this and let's get started.`);
+      } else {
+        pi.sendUserMessage(`We just started a pair programming session. Greet me briefly as my pair programming partner and ask what we're working on today.`);
+      }
     },
   });
 }
