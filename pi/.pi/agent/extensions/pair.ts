@@ -67,8 +67,8 @@ Your operating model: you drive the implementation, I navigate and review. Optim
 
 const ALERT_SOUND = join(homedir(), ".pi/agent/sounds/metal-gear-codec.mp3");
 
-function buildWidget(): string[] {
-  return [`👯‍♂️  Pair mode`];
+function buildWidget(notify = false): string[] {
+  return [notify ? `👯‍♂️ 🔔 Pair mode` : `👯‍♂️  Pair mode`];
 }
 
 export default function pairExtension(pi: ExtensionAPI) {
@@ -105,10 +105,17 @@ export default function pairExtension(pi: ExtensionAPI) {
     }
   });
 
-  // Play Metal Gear alert sound when agent finishes and needs input
+  // Play Metal Gear alert sound and show notification bell when agent finishes
   pi.on("agent_end", async (_event, ctx) => {
     if (!enabled || !ctx.hasUI) return;
     pi.exec("afplay", [ALERT_SOUND]).catch(() => {});
+    ctx.ui.setWidget(WIDGET_KEY, buildWidget(true));
+  });
+
+  // Clear notification bell when user sends a message
+  pi.on("input", async (_event, ctx) => {
+    if (!enabled || !ctx.hasUI) return;
+    ctx.ui.setWidget(WIDGET_KEY, buildWidget(false));
   });
 
   // Inject system prompt when pair mode is active
