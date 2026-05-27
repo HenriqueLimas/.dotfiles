@@ -111,10 +111,10 @@ git commit --amend --no-edit
 ### 10. Force push
 
 ```bash
-git push --force-with-lease --no-verify origin <branch>
+git push --force-with-lease origin <branch>
 ```
 
-Use `--no-verify` to skip the pre-push Playwright hook (which requires eBay VPN). Unit tests (`yarn test run`) and type-check (`yarn type:check`) should be confirmed passing before pushing.
+Unit tests (`yarn test run`) and type-check (`yarn type:check`) should be confirmed passing before pushing. The pre-push hook runs Playwright e2e which requires eBay VPN — if it times out, **do not use `--no-verify`** unless the user explicitly requests it.
 
 ## Known Gotchas
 
@@ -122,7 +122,7 @@ Use `--no-verify` to skip the pre-push Playwright hook (which requires eBay VPN)
 |---|---|
 | `"T" is not exported by "#i18n/..."` build error | `vite.config.ts` is missing `framework: "react"` in `i18nEbay()` — the bare call disables the React `T` component export |
 | `yarn install` fails on lock conflict | Yarn 1.x auto-merges lock conflicts — just run `yarn install` and it resolves itself |
-| Pre-push hook times out (Playwright needs VPN) | Use `--no-verify`; unit tests + type-check are sufficient local validation |
+| Pre-push hook times out (Playwright needs VPN) | Ask the user whether to proceed — **never add `--no-verify` without explicit instruction** |
 | `fgql typegen` fails with `socket hang up` | Expected outside eBay VPN — the generated `.d.ts` files are committed and don't need regeneration locally |
 
 ## Branches this applies to
