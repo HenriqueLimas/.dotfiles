@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 
-# Use fzf to select directory from the same paths as tmux-sessionizer
-selected=$(find ~/ ~/Development/ebay ~/Development/github -maxdepth 1 -mindepth 1 -type d | fzf)
+# Accept an optional directory argument; fall back to fzf picker if not provided
+if [[ -n $1 ]]; then
+    selected="$1"
+else
+    # Use fzf to select directory from the same paths as tmux-sessionizer
+    selected=$(find ~/ ~/Development/ebay ~/Development/github -maxdepth 1 -mindepth 1 -type d | fzf)
 
-# Exit if no directory selected (user cancelled fzf)
-if [[ -z $selected ]]; then
-    exit 0
+    # Exit if no directory selected (user cancelled fzf)
+    if [[ -z $selected ]]; then
+        exit 0
+    fi
 fi
 
 pi_cmd="pi --continue"
