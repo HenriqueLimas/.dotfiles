@@ -15,7 +15,7 @@ Rebases a long-lived feature branch (e.g. `fgql`, `rsc`) of `sample-app-react-eb
   - Current dir → feature branch (`fgql`, `rsc`, …)
 - The feature branch adds new packages and files on top of main, so `package.json` and `yarn.lock` **always** conflict.
 - `vite.config.ts` may also conflict if main changed the Vite plugin configuration.
-- Pre-push hook runs Playwright e2e (requires VPN/eBay network); bypass with `--no-verify` after confirming unit tests pass locally.
+- Pre-push hook runs Playwright e2e (requires VPN/eBay network); if it times out, ask the user how to proceed — **never use `--no-verify` without explicit instruction**.
 
 ## Steps
 
