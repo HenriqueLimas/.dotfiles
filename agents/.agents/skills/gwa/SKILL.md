@@ -46,7 +46,7 @@ git branch -r --list "origin/<branch-name>"
 ```
 
 - If the branch exists locally or remotely → use `git worktree add` **without** `-b` (checkout existing branch).
-- If the branch does **not** exist → use `git worktree add -b <branch-name>` to create it from the current HEAD.
+- If the branch does **not** exist → create it from `main` (fetch latest first), unless the user explicitly specifies a different base.
 
 ### 3. Create the worktree
 
@@ -55,10 +55,15 @@ git branch -r --list "origin/<branch-name>"
 git worktree add "$WORKTREE_PATH" "<branch-name>"
 ```
 
-**Branch does not exist (create it):**
+**Branch does not exist (create it from `main`):**
 ```bash
-git worktree add -b "<branch-name>" "$WORKTREE_PATH"
+# Ensure main is up to date
+git fetch origin main
+
+git worktree add -b "<branch-name>" "$WORKTREE_PATH" origin/main
 ```
+
+If the user specified a different base (e.g. `/gwa my-feature from develop`), substitute that branch for `origin/main` in the command above.
 
 If the command fails (e.g. the worktree path already exists), report the error and stop. Do not attempt to recover silently.
 
@@ -104,6 +109,7 @@ Tell the user:
 | Not inside a git repo | Warn and stop immediately |
 | Worktree path already exists | Report the conflict and stop; suggest `gwr` to remove it first |
 | Branch exists locally **and** remotely | Prefer local; use `git worktree add` without `-b` |
+| User specifies a base branch (e.g. "from develop") | Use `origin/<base>` instead of `origin/main`; fetch it first |
 | Branch exists in another worktree already | Git will error; report it and stop |
 | `ni` command not found | Warn the user; skip install step; continue to tmux step |
 | `ni` fails (install errors) | Report the failure; continue to tmux step |
