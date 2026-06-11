@@ -1,5 +1,15 @@
 {
   "providers": {
+    "github-copilot": {
+      "models": [
+        {
+          "id": "claude-fable-5",
+          "name": "Claude Fable 5 (Copilot)",
+          "input": ["text", "image"],
+          "contextWindow": 200000
+        }
+      ]
+    },
     "ebay": {
       "api": "anthropic-messages",
       "apiKey": "!cat ~/.ebay-claude-code.txt 2>/dev/null || npx -y --registry=https://npm.corp.ebay.com @ebay/claude-code-token get_token",
@@ -8,7 +18,11 @@
       "models": [
         {
           "id": "claude-sonnet-4-6",
-          "contextWindow": 1000000
+          "contextWindow": 200000,
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "xhigh": "max"
+          }
         }
       ]
     }
