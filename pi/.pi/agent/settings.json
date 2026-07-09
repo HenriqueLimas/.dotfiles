@@ -1,5 +1,17 @@
 {
-  "lastChangelogVersion": "0.75.3",
+  "lastChangelogVersion": "0.80.3",
   "defaultProvider": "ebay",
-  "defaultModel": "claude-sonnet-4-6"
+  "defaultModel": "claude-sonnet-4-6",
+  "defaultThinkingLevel": "high",
+  "theme": "dark",
+  "retry": {
+    "enabled": true,
+    "maxRetries": 8,
+    "baseDelayMs": 3000,
+    "provider": {
+      "timeoutMs": 600000,
+      "maxRetries": 0,
+      "maxRetryDelayMs": 60000
+    }
+  }
 }
