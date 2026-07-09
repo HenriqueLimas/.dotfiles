@@ -1,9 +1,10 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { isToolCallEventType, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
 const PAIR_ENTRY_TYPE = "pair-mode";
 const WIDGET_KEY = "pair-mode";
+const PAIR_STATE_VERSION = 1;
 
 const PAIR_SYSTEM_PROMPT = `
 ## Pair Programming Mode
@@ -62,64 +63,201 @@ Follow these principles:
    - Known risks, open questions, or follow-ups.
    - What comes next — and whether you need my input before proceeding.
 
+10. Pair-mode approval gate.
+   - Pair mode enforces explicit approval for edit, write, and mutating bash tool calls.
+   - Before attempting those tools, explain the intended change and why it is needed.
+   - If a tool call is blocked, stop, describe what was blocked, and ask me how to proceed.
+
 Your operating model: you drive the implementation, I navigate and review. Optimize for transparency, small safe changes, verifiable behavior, and easy human review. When in doubt, pause and ask.
 `;
 
 const ALERT_SOUND = join(homedir(), ".pi/agent/sounds/metal-gear-codec.mp3");
 
-function buildWidget(notify = false): string[] {
-  return [notify ? `👯‍♂️ 🔔 Pair mode` : `👯‍♂️  Pair mode`];
+const MUTATING_BASH_PATTERNS: RegExp[] = [
+  /(?:^|[;&|]\s*)(rm|mv|cp|mkdir|touch|chmod|chown|ln)\b/i,
+  /\bgit\s+(add|commit|push|pull|merge|rebase|checkout|switch|reset|restore|stash|clean|apply|am|tag)\b/i,
+  /\b(npm|pnpm|yarn|bun)\s+(install|i|add|remove|rm|uninstall|update|upgrade|dedupe|link|unlink)\b/i,
+  /\b(pip|pip3)\s+install\b/i,
+  /\bpython\s+-m\s+pip\s+install\b/i,
+  /\bcargo\s+(add|remove|install|update|publish)\b/i,
+  /\bgo\s+(get|install)\b/i,
+  /\bsed\s+.*\s-i(?:\s|$)/i,
+  /\bperl\s+.*\s-pi(?:\s|$)/i,
+  /(?:^|[;&|]\s*)tee\b/i,
+  /(^|[^<])>>?\s*[^\s&|;]/,
+];
+
+interface PairState {
+  enabled: boolean;
+  description: string;
+  version?: number;
+}
+
+type PairCustomEntry = {
+  type: "custom";
+  customType?: string;
+  data?: Partial<PairState>;
+};
+
+function buildWidget(notify = false, description?: string): string[] {
+  const suffix = description ? ` — ${description}` : "";
+  return [notify ? `👯‍♂️ 🔔 Pair mode${suffix}` : `👯‍♂️  Pair mode${suffix}`];
+}
+
+function isPairCustomEntry(entry: unknown): entry is PairCustomEntry {
+  return (
+    typeof entry === "object" &&
+    entry !== null &&
+    (entry as { type?: unknown }).type === "custom" &&
+    (entry as { customType?: unknown }).customType === PAIR_ENTRY_TYPE
+  );
+}
+
+function isMutatingBashCommand(command: string): boolean {
+  return MUTATING_BASH_PATTERNS.some((pattern) => pattern.test(command));
+}
+
+function describeToolCall(event: { toolName: string; input: Record<string, unknown> }): string {
+  if (event.toolName === "edit") {
+    const path = typeof event.input.path === "string" ? event.input.path : "unknown path";
+    const edits = Array.isArray(event.input.edits) ? event.input.edits.length : undefined;
+    return edits === undefined ? `edit ${path}` : `edit ${path} (${edits} replacement${edits === 1 ? "" : "s"})`;
+  }
+
+  if (event.toolName === "write") {
+    const path = typeof event.input.path === "string" ? event.input.path : "unknown path";
+    return `write ${path}`;
+  }
+
+  if (event.toolName === "bash") {
+    const command = typeof event.input.command === "string" ? event.input.command : "unknown command";
+    return `run mutating bash command:\n\n${command}`;
+  }
+
+  return event.toolName;
 }
 
 export default function pairExtension(pi: ExtensionAPI) {
   let enabled = false;
   let description = "";
 
-  function enable(desc: string, ctx: { ui: { setWidget: Function } }) {
-    enabled = true;
-    description = desc;
-    ctx.ui.setWidget(WIDGET_KEY, buildWidget());
-  }
-
-  function disable(ctx: { ui: { setWidget: Function } }) {
-    enabled = false;
-    description = "";
-    ctx.ui.setWidget(WIDGET_KEY, []);
-  }
-
-  // Restore state on session start
-  pi.on("session_start", (_event, ctx) => {
+  function renderWidget(ctx: ExtensionContext, notify = false): void {
     if (!ctx.hasUI) return;
+    ctx.ui.setWidget(WIDGET_KEY, enabled ? buildWidget(notify, description) : undefined);
+  }
 
-    const entries = ctx.sessionManager.getEntries();
-    // Find the last pair-mode entry
-    const pairEntries = entries.filter(
-      (e) => e.type === "custom" && (e as any).customType === PAIR_ENTRY_TYPE
+  function persistState(): void {
+    pi.appendEntry(PAIR_ENTRY_TYPE, {
+      version: PAIR_STATE_VERSION,
+      enabled,
+      description,
+    });
+  }
+
+  function setState(nextState: PairState, ctx: ExtensionContext, options: { persist?: boolean; notify?: boolean } = {}): void {
+    enabled = nextState.enabled;
+    description = nextState.enabled ? nextState.description || "pair programming session" : "";
+    renderWidget(ctx, options.notify ?? false);
+
+    if (options.persist) {
+      persistState();
+    }
+  }
+
+  function restoreStateFromCurrentBranch(ctx: ExtensionContext): void {
+    const pairEntries = ctx.sessionManager.getBranch().filter(isPairCustomEntry);
+    const last = pairEntries.at(-1);
+
+    setState(
+      {
+        enabled: last?.data?.enabled === true,
+        description: last?.data?.description || "",
+        version: last?.data?.version,
+      },
+      ctx,
+    );
+  }
+
+  async function confirmMutation(event: { toolName: string; input: Record<string, unknown> }, ctx: ExtensionContext) {
+    const action = describeToolCall(event);
+    const reason = `Pair mode blocked ${action}. Pair mode requires explicit approval before edit, write, or mutating bash tool calls.`;
+
+    if (!ctx.hasUI) {
+      return { block: true as const, reason };
+    }
+
+    const allowed = await ctx.ui.confirm(
+      "Pair mode approval required",
+      `Allow the agent to ${action}?\n\nOnly approve this if the agent already explained the intended change and it matches what you want.`,
     );
 
-    if (pairEntries.length > 0) {
-      const last = pairEntries[pairEntries.length - 1] as any;
-      if (last.data?.enabled && last.data?.description) {
-        enable(last.data.description, ctx);
-      }
+    if (!allowed) {
+      return { block: true as const, reason };
+    }
+
+    return undefined;
+  }
+
+  function sendPairKickoff(message: string, ctx: ExtensionContext): void {
+    if (ctx.isIdle()) {
+      pi.sendUserMessage(message);
+      return;
+    }
+
+    pi.sendUserMessage(message, { deliverAs: "followUp" });
+  }
+
+  // Restore state on session start/resume/reload from the active branch only.
+  pi.on("session_start", (_event, ctx) => {
+    restoreStateFromCurrentBranch(ctx);
+  });
+
+  // /tree changes the active branch without creating a new session, so recompute state.
+  pi.on("session_tree", (_event, ctx) => {
+    restoreStateFromCurrentBranch(ctx);
+  });
+
+  // After compaction, write a fresh state marker so pair state remains explicit after the compaction point.
+  pi.on("session_compact", () => {
+    if (enabled) {
+      persistState();
     }
   });
 
-  // Play Metal Gear alert sound and show notification bell when agent finishes
+  // Hard guard: pair mode requires approval before write/edit/mutating bash tools execute.
+  pi.on("tool_call", async (event, ctx) => {
+    if (!enabled) return undefined;
+
+    if (event.toolName === "edit" || event.toolName === "write") {
+      return confirmMutation(event as { toolName: string; input: Record<string, unknown> }, ctx);
+    }
+
+    if (isToolCallEventType("bash", event) && isMutatingBashCommand(event.input.command)) {
+      return confirmMutation(event as { toolName: string; input: Record<string, unknown> }, ctx);
+    }
+
+    return undefined;
+  });
+
+  // Play Metal Gear alert sound and show notification bell when agent finishes.
   pi.on("agent_end", async (_event, ctx) => {
     if (!enabled || !ctx.hasUI) return;
-    pi.exec("afplay", [ALERT_SOUND]).catch(() => {});
-    ctx.ui.setWidget(WIDGET_KEY, buildWidget(true));
+
+    if (ctx.mode === "tui" && process.platform === "darwin") {
+      pi.exec("afplay", [ALERT_SOUND]).catch(() => {});
+    }
+
+    renderWidget(ctx, true);
   });
 
-  // Clear notification bell when user sends a message
-  pi.on("input", async (_event, ctx) => {
-    if (!enabled || !ctx.hasUI) return;
-    ctx.ui.setWidget(WIDGET_KEY, buildWidget(false));
+  // Clear notification bell when the human sends a message.
+  pi.on("input", async (event, ctx) => {
+    if (!enabled || !ctx.hasUI || event.source === "extension") return;
+    renderWidget(ctx, false);
   });
 
-  // Inject system prompt when pair mode is active
-  pi.on("before_agent_start", (event, _ctx) => {
+  // Inject system prompt when pair mode is active.
+  pi.on("before_agent_start", (event) => {
     if (!enabled) return;
 
     return {
@@ -131,33 +269,45 @@ export default function pairExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("pair", {
-    description: 'Toggle pair mode. /pair [description] to start, /pair off to stop',
+    description: "Toggle pair mode. /pair [description] to start/update, /pair off to stop",
     handler: async (args, ctx) => {
       const input = args.trim();
 
-      if (input === "off") {
+      if (input.toLowerCase() === "off") {
         if (!enabled) {
           ctx.ui.notify("Pair mode is not active.", "info");
           return;
         }
-        disable(ctx);
-        pi.appendEntry(PAIR_ENTRY_TYPE, { enabled: false, description: "" });
+
+        setState({ enabled: false, description: "" }, ctx, { persist: true });
         ctx.ui.notify("Pair mode off.", "info");
         return;
       }
 
       if (enabled) {
-        ctx.ui.notify(`Pair mode is already on — ${description}`, "info");
+        if (!input) {
+          ctx.ui.notify(`Pair mode is on — ${description}`, "info");
+          return;
+        }
+
+        setState({ enabled: true, description: input }, ctx, { persist: true });
+        ctx.ui.notify(`Pair mode updated — ${input}`, "info");
         return;
       }
 
       const desc = input || "pair programming session";
-      enable(desc, ctx);
-      pi.appendEntry(PAIR_ENTRY_TYPE, { enabled: true, description: desc });
+      setState({ enabled: true, description: desc }, ctx, { persist: true });
+
       if (input) {
-        pi.sendUserMessage(`We just started a pair programming session. We are working on: ${desc}. Acknowledge this and let's get started.`);
+        sendPairKickoff(
+          `We just started a pair programming session. We are working on: ${desc}. Acknowledge this and let's get started.`,
+          ctx,
+        );
       } else {
-        pi.sendUserMessage(`We just started a pair programming session. Greet me briefly as my pair programming partner and ask what we're working on today.`);
+        sendPairKickoff(
+          "We just started a pair programming session. Greet me briefly as my pair programming partner and ask what we're working on today.",
+          ctx,
+        );
       }
     },
   });
