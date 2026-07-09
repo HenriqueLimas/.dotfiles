@@ -6,7 +6,7 @@ return {
 			local parser_config = require("nvim-treesitter.parsers").get_parser_configs()
 			parser_config.marko = {
 				install_info = {
-					url = "/Users/hlimas/Development/github/tree-sitter-marko",
+					url = "/Users/hlimas/Development/github/marko-tree-sitter",
 					files = { "src/parser.c", "src/scanner.c" },
 					generate_requires_npm = true,
 				},
