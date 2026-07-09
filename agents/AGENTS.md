@@ -2,6 +2,5 @@
 
 Rules that apply across **all repos and all sessions**.
 
-## Git
-
-- **Never use `--no-verify`** on any git command (`commit`, `push`, etc.) unless the user explicitly asks for it in that message.
+For every final response, end with exactly:
+CANARY: moo-7f3a

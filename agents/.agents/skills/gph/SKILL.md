@@ -1,6 +1,6 @@
 ---
 name: gph
-description: Stage the session's relevant changes, commit using the repo's commit message style, and push to origin. Does not create a PR — use /create-pr for that. Use when the user says "commit and push", "gph", or wants to push their current changes to the remote.
+description: Stage the session's relevant changes, commit using the repo's commit message style, and push to origin. Does not create a PR — use /create-pr for that. Use when the user invokes /gph
 ---
 
 # Git Push (`/gph`)

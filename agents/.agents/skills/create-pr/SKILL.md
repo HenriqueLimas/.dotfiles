@@ -1,6 +1,6 @@
 ---
 name: create-pr
-description: Create a GitHub Pull Request for the current branch using the repo's PULL_REQUEST_TEMPLATE if present. Scopes the PR description to the current session's changes. Use when the user says "create a PR", "open a PR", or invokes /create-pr.
+description: Create a GitHub Pull Request for the current branch using the repo's PULL_REQUEST_TEMPLATE if present. Scopes the PR description to the current session's changes. Use when the user invokes /create-pr.
 ---
 
 # Create PR (`/create-pr`)
