@@ -1,76 +1,61 @@
-(doctype) @keyword
+; Basic syntax highlighting for Marko templates.
+
+; Statement-tag names are not tags visually: static/server/client are
+; Marko keywords (the compiler strips them before parsing the body as TS),
+; while import/export/class are part of the injected TS statement itself
+; and take their color from that injection (see injections.scm).
+((tag_name (tag_name_fragment) @tag)
+ (#not-any-of? @tag "import" "export" "class" "static" "server" "client"))
+((tag_name (tag_name_fragment) @keyword)
+ (#any-of? @keyword "static" "server" "client"))
+(close_tag_name) @tag
+(shorthand_id) @constant
+(shorthand_class) @property
+
+(attr_name) @attribute
+
+; Binding positions: patterns get the TS injection; types are captured
+; flatly because a bare type is not a valid TS program (matching the
+; tmLanguage grammar's source.ts#type approximation).
+(var_pattern) @variable
+(var_type) @type
+(param_pattern) @variable.parameter
+(param_type) @type
+(param_default) @none
+(type_expr) @type
+
+(open_tag_start) @punctuation.bracket
+(open_tag_end) @punctuation.bracket
+(open_tag_end_self) @punctuation.bracket
+(close_tag_start) @punctuation.bracket
+(close_tag_end) @punctuation.bracket
+
+(args_open) @punctuation.bracket
+(args_close) @punctuation.bracket
+(params_open) @punctuation.bracket
+(params_close) @punctuation.bracket
+(type_open) @punctuation.bracket
+(type_close) @punctuation.bracket
+(attr_group_open) @punctuation.bracket
+(attr_group_close) @punctuation.bracket
+(method_body_open) @punctuation.bracket
+(method_body_close) @punctuation.bracket
+(scriptlet_block_open) @punctuation.bracket
+(scriptlet_block_close) @punctuation.bracket
+
+(placeholder_start) @punctuation.special
+(placeholder_start_raw) @punctuation.special
+(placeholder_end) @punctuation.special
+
 (html_comment) @comment
+(line_comment) @comment
+(block_comment) @comment
 
-(scriptlet) @keyword
+(doctype) @keyword
+(declaration) @keyword
+(cdata) @string
 
-(style_block_css) @keyword
-(style_block_less) @keyword
-(style_block_scss) @keyword
-(style_block_js) @keyword
-(style_block_ts) @keyword
-(script_block) @keyword
+(scriptlet_start) @punctuation.special
+(scriptlet_start_concise) @punctuation.special
 
-(concise_tag) @tag
-(concise_attribute_group
-  ["[" "]"] @punctuation.bracket)
-(concise_terminator) @punctuation.delimiter
-(concise_fence_block
-  ["---" "---"] @punctuation.special)
-(concise_fence_line
-  ["--"] @punctuation.special)
-
-(placeholder
-  ["${" "$!{" "}"] @punctuation.special)
-
-(builtin_tag_name) @tag
-(flow_tag_name) @conditional
-(function_tag_name) @function
-(dynamic_tag_name
-  ["${" "}"] @punctuation.special)
-(tag_variable) @variable
-(tag_default_value) @operator
-(tag_variable_fragment) @variable
-(tag_default_fragment) @expression
-(tag_parameters_fragment) @parameter
-(tag_arguments_fragment) @expression
-(tag_method_block_fragment) @expression
-(tag_parameters
-  ["|" "|"] @punctuation.delimiter)
-(tag_arguments
-  ["(" ")"] @punctuation.delimiter)
-(tag_method
-  ["{" "}"] @punctuation.delimiter)
-
-(tag_name) @tag
-(special_attribute_name) @keyword
-(attribute_name) @tag.attribute
-(shorthand_attribute) @tag.attribute
-(attribute_arguments
-  ["(" ")"] @punctuation.delimiter)
-(attribute_method
-  ["{" "}"] @punctuation.delimiter)
-(attribute_paren_value
-  ["(" ")"] @punctuation.delimiter)
-(attribute_bracket_value
-  ["[" "]"] @punctuation.bracket)
-(attribute_arguments_fragment) @expression
-(attribute_paren_fragment) @expression
-(attribute_bracket_fragment) @expression
-(attribute_method_fragment) @expression
-(attribute_method_nested_block
-  ["{" "}"] @punctuation.delimiter)
-(attribute_value_fragment) @expression
-
-[
-  "<"
-  "</"
-  ">"
-  "/>"
-] @tag.delimiter
-
-(quoted_attribute_value) @string
-(unquoted_attribute_value) @string
-
-(top_level_statement) @none
 (text) @none
-
