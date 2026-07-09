@@ -9,66 +9,32 @@
  * default.  This extension intercepts those messages on `message_end` and
  * rewrites errorMessage so pi's retry loop picks them up automatically.
  *
- * Errors that ARE normalised (transient / infrastructure):
- *   - "Request timed out."
- *   - "Connection error."
- *   - CircuitBreaker OPEN / HALF_OPEN  (Azure load-balancer)
- *   - Connection error / PoolAcquirePendingLimitException (Netty pool)
- *   - 500 Re-thrown: OpenCircuitError  (Envoy upstream)
- *   - 503 upstream model provider high demand
- *
- * Errors that are NOT normalised (permanent / need human action):
- *   - 400  model not available for integrator
- *   - 401 / 403  invalid token / signature
- *   - Failed to resolve API key
+ * Behaviour:
+ *  - Any error from the ebay provider is considered retryable (including
+ *    "Invalid token" and other previously-permanent errors, which in practice
+ *    are transient gateway/proxy failures on the eBay stack).
+ *  - Up to MAX_RETRIES (3) attempts are made per agent turn.  On the 4th
+ *    failure the error is left unchanged so pi surfaces it to the user.
+ *  - A loading spinner / status message is always shown while retrying.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-// ── Transient patterns that should trigger pi's auto-retry ──────────────────
-
-const TRANSIENT_PATTERNS: RegExp[] = [
-	// Generic timeouts and connection drops
-	/^Request timed out\.$/i,
-	/^Connection error\.$/i,
-
-	// Azure circuit-breaker (OPEN or HALF_OPEN = upstream saturated)
-	/CircuitBreaker .+ is (OPEN|HALF_OPEN)/i,
-
-	// Netty connection pool exhaustion
-	/Connection error.*PoolAcquirePendingLimitException/i,
-	/reactor\.netty.*PoolAcquirePendingLimitException/i,
-
-	// Envoy / gateway open-circuit error
-	/OpenCircuitError/i,
-	/Re-thrown:.*OpenCircuitError/i,
-
-	// 503 upstream overloaded
-	/upstream model provider is currently experiencing high demand/i,
-	/OpenAI API error \(503\)/i,
-];
-
-// ── Permanent patterns – must NOT be rewritten ──────────────────────────────
-
-const PERMANENT_PATTERNS: RegExp[] = [
-	// 400 model-not-available-for-integrator
-	/requested model is not available for integrator/i,
-	// 401 / 403 auth failures
-	/Invalid token/i,
-	/signature verification failed/i,
-	/Failed to resolve API key/i,
-	// 400 invalid request body
-	/invalid_request_body/i,
-];
-
-function isTransient(errorMessage: string): boolean {
-	if (PERMANENT_PATTERNS.some((re) => re.test(errorMessage))) return false;
-	return TRANSIENT_PATTERNS.some((re) => re.test(errorMessage));
-}
+const MAX_RETRIES = 3;
+const STATUS_KEY = "ebay-retry";
 
 // ── Extension ────────────────────────────────────────────────────────────────
 
 export default function ebayRetry(pi: ExtensionAPI) {
+	// Per-turn retry counter: reset at the start of each LLM turn so every
+	// turn gets a fresh 3-retry budget independently.
+	let retryCount = 0;
+
+	pi.on("turn_start", (_event, ctx) => {
+		if (ctx.model?.provider !== "ebay") return;
+		retryCount = 0;
+	});
+
 	pi.on("message_end", (event, ctx) => {
 		const { message } = event;
 
@@ -82,11 +48,28 @@ export default function ebayRetry(pi: ExtensionAPI) {
 		// Already in a format pi recognises – nothing to do
 		if (errorMessage.startsWith("overloaded_error")) return;
 
-		if (!isTransient(errorMessage)) return;
+		// Exhausted retries – surface the original error to the user
+		if (retryCount >= MAX_RETRIES) {
+			ctx.ui.setStatus(STATUS_KEY, "");
+			if (ctx.hasUI) {
+				ctx.ui.notify(
+					`eBay proxy: giving up after ${MAX_RETRIES} retries. Last error: ${errorMessage.slice(0, 120)}`,
+					"error",
+				);
+			}
+			return;
+		}
+
+		retryCount++;
+
+		const label = `eBay proxy error – retrying (${retryCount}/${MAX_RETRIES})…`;
+
+		// Always show a loading spinner so the user knows something is happening
+		ctx.ui.setStatus(STATUS_KEY, label);
 
 		if (ctx.hasUI) {
 			ctx.ui.notify(
-				`eBay proxy transient error – will retry: ${errorMessage.slice(0, 80)}`,
+				`${label} ${errorMessage.slice(0, 80)}`,
 				"warning",
 			);
 		}
@@ -99,5 +82,12 @@ export default function ebayRetry(pi: ExtensionAPI) {
 				errorMessage: `overloaded_error: ${errorMessage}`,
 			},
 		};
+	});
+
+	pi.on("agent_end", (_event, ctx) => {
+		if (ctx.model?.provider !== "ebay") return;
+		// Clear the spinner once the agent finishes (success or final failure)
+		ctx.ui.setStatus(STATUS_KEY, "");
+		retryCount = 0;
 	});
 }
