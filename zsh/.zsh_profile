@@ -44,10 +44,23 @@ export PATH="$HOME/.local/bin:$PATH"
 export GOPATH="$HOME/go"
 export PATH="$PATH:/usr/local/go/bin:$GOPATH/bin"
 
-# NVM
-export NVM_DIR="$HOME/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm
-[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"  # This loads nvm bash_completion
+# pnpm
+export PNPM_HOME="/Users/hlimas/Library/pnpm"
+case ":$PATH:" in
+  *":$PNPM_HOME/bin:"*) ;;
+  *) export PATH="$PNPM_HOME/bin:$PATH" ;;
+esac
+# pnpm end
 
 . "$HOME/.cargo/env"
 eval $(/opt/homebrew/bin/brew shellenv)
+
+# fnm (must come after brew so fnm's node takes precedence)
+eval "$(fnm env --use-on-cd --shell zsh)"
+alias nvm="fnm"
+
+# The following lines have been added by Docker Desktop to enable Docker CLI completions.
+fpath=(/Users/hlimas/.docker/completions $fpath)
+autoload -Uz compinit
+compinit
+# End of Docker CLI completions
