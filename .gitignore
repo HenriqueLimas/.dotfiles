@@ -5,3 +5,5 @@ bin/.local/state
 pi/.pi/agent/auth.json
 pi/.pi/agent/sessions/
 nvim/.config/nvim/parser/
+nvim/.config/nvim/lazy-lock.json
+zsh/.zsh_profile

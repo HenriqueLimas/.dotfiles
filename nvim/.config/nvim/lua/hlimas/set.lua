@@ -32,16 +32,23 @@ vim.opt.colorcolumn = "120"
 -- Auto-select the current file when opening netrw
 vim.g.netrw_fastbrowse = 0
 
+-- Capture the filename before netrw takes over the current buffer
+local _netrw_origin_file = ""
+vim.api.nvim_create_autocmd("BufLeave", {
+	callback = function(ev)
+		if vim.bo[ev.buf].filetype ~= "netrw" then
+			_netrw_origin_file = vim.fn.expand("%:t")
+		end
+	end,
+})
+
 -- Position cursor on current file in netrw
 vim.api.nvim_create_autocmd("FileType", {
 	pattern = "netrw",
 	callback = function()
-		-- Delay the search to ensure netrw has fully loaded
+		local file_name = _netrw_origin_file
 		vim.defer_fn(function()
-			-- Get the file name we came from
-			local file_name = vim.fn.expand("#:t")
 			if file_name ~= "" then
-				-- Search for that filename in the netrw buffer
 				vim.fn.search("\\V" .. vim.fn.escape(file_name, "\\"))
 			end
 		end, 10)

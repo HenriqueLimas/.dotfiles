@@ -1,5 +1,5 @@
 {
-  "lastChangelogVersion": "0.80.3",
+  "lastChangelogVersion": "0.80.6",
   "defaultProvider": "ebay",
   "defaultModel": "claude-sonnet-4-6",
   "defaultThinkingLevel": "high",
@@ -13,5 +13,6 @@
       "maxRetries": 0,
       "maxRetryDelayMs": 60000
     }
-  }
+  },
+  "showCacheMissNotices": true
 }
