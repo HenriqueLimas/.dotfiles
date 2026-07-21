@@ -2,6 +2,7 @@
 automatic_backups
 bin/.local/share
 bin/.local/state
+agents/.agents/.skill-lock.json
 pi/.pi/agent/auth.json
 pi/.pi/agent/sessions/
 nvim/.config/nvim/parser/
