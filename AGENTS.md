@@ -21,6 +21,7 @@ This repository is a personal dotfiles repo managed with GNU Stow. Each top-leve
 - If adding a new top-level Stow package, update `install.sh` if it should be installed by the default restow command.
 - Keep paths Stow-safe: add files under the package directory exactly where they should appear relative to `$HOME`.
 - Do not use `git commit --no-verify`, `git push --no-verify`, or any other `--no-verify` flag unless the user explicitly asks for it.
+- Never use `git commit --no-gpg-sign` or otherwise disable commit signing. If signing fails, stop and ask the user to complete or fix the signing step.
 
 ## Validation commands
 
