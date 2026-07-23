@@ -87,12 +87,7 @@ print(result["workspace"]["workspace_id"], result["root_pane"]["pane_id"])
 '
 )
 
-agent_name="pi-$(printf '%s' "$selected" | cksum | awk '{print $1}')"
-if ! "$herdr_bin" agent start "$agent_name" \
-  --kind pi \
-  --pane "$pane_id" \
-  -- \
-  --continue; then
+if ! "$herdr_bin" pane run "$pane_id" "pi --continue"; then
   "$herdr_bin" workspace close "$workspace_id" >/dev/null 2>&1 || true
   printf 'Failed to start Pi in %s\n' "$selected" >&2
   exit 1
