@@ -25,7 +25,7 @@
 # red = "#ff6188"
 # green = "#a6e3a1"
 
-name = "dracula"
+name = "rose-pine"
 auto_switch = false
 [terminal]
 # Executable used for new interactive panes.
@@ -134,6 +134,12 @@ key = "prefix+f"
 type = "plugin_action"
 command = "hlimas.project-picker.open"
 description = "find or open a project workspace"
+
+[[keys.command]]
+key = "prefix+d"
+type = "shell"
+command = "~/.config/herdr/scripts/open-hunk-diff.sh"
+description = "open Hunk diff in a side pane"
 
 # Legacy indexed shortcut config is still parsed for compatibility.
 # Prefer switch_tab, switch_workspace, and focus_agent for new configs.
