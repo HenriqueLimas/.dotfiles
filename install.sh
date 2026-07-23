@@ -1,6 +1,6 @@
 #! /usr/bin/env bash
 
-folders="bin nvim tmux zsh karabiner rust pi agents"
+folders="bin nvim zsh karabiner rust pi agents herdr"
 
 for folder in $(echo $folders)
 do

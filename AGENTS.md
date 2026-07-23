@@ -8,11 +8,9 @@ This repository is a personal dotfiles repo managed with GNU Stow. Each top-leve
 - A file path inside a package should match its final home-directory path:
   - `zsh/.zshrc` -> `~/.zshrc`
   - `nvim/.config/nvim/init.lua` -> `~/.config/nvim/init.lua`
-  - `tmux/.tmux.conf` -> `~/.tmux.conf`
-  - `bin/.local/bin/tmux-sessionizer` -> `~/.local/bin/tmux-sessionizer`
   - `pi/.pi/settings.json` -> `~/.pi/settings.json`
-- `install.sh` currently restows these packages: `bin nvim tmux zsh karabiner rust pi`.
-- `agents/` is also shaped like a Stow package for agent-related home config, but it is not included in `install.sh` right now.
+  - `herdr/.config/herdr/config.toml` -> `~/.config/herdr/config.toml`
+- `install.sh` currently restows these packages: `bin nvim zsh karabiner rust pi agents herdr`.
 
 ## Important workflow notes
 
@@ -39,7 +37,7 @@ There is no normal build/test suite. Use targeted checks instead:
   ```sh
   stow --delete --target="$HOME" <package>
   ```
-- For shell scripts under `bin/.local/bin` or `install.sh`, run `shellcheck` if available.
+- For `install.sh`, run `shellcheck` if available.
 - For Neovim Lua changes, keep formatting consistent with the existing tabs/indentation and validate by starting `nvim` or checking the specific Lua module when practical.
 
 ## Sensitive/local files
@@ -50,10 +48,10 @@ There is no normal build/test suite. Use targeted checks instead:
 ## Package context
 
 - `zsh/`: Oh My Zsh config, aliases, PATH setup, fnm, Homebrew, Docker completions, and corporate CA bundle environment variables.
-- `tmux/`: tmux config, vim-style copy mode, popup/editor helpers, tmux-resurrect/continuum, and custom bindings for agent panes and resizing.
-- `bin/`: helper scripts installed into `~/.local/bin`, including tmux sessionizer, popup Neovim wrapper, agent pane launcher, cheat-sheet launcher, and pane resize helper.
+- `bin/`: Stow package for `~/.local`; it currently has no tracked executables.
 - `nvim/`: Neovim config using `lazy.nvim`, Lua modules under `lua/hlimas`, LSP/completion setup, conform formatting, Treesitter/Marko support, and personal keymaps.
 - `karabiner/`: Karabiner Elements JSON config.
 - `rust/`: Cargo environment file.
 - `pi/`: pi agent/settings config. Avoid touching auth/session files.
 - `agents/`: global agent config/skills package, separate from this root `AGENTS.md` repo guide.
+- `herdr/`: Herdr configuration and local workflow plugins.

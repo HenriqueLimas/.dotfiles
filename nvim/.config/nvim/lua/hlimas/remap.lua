@@ -12,7 +12,6 @@ vim.api.nvim_create_user_command(
 )
 vim.api.nvim_create_user_command("Q", "quit", { bang = true, desc = "Quite current window (alias for :q)" })
 
-vim.keymap.set("n", "<C-f>", "<cmd>silent !tmux neww tmux-sessionizer<CR>")
 vim.keymap.set("n", "<leader>f", function()
 	require("conform").format({ bufnr = 0 })
 end)

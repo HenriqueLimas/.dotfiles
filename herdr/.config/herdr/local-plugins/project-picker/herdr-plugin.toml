@@ -1,0 +1,21 @@
+id = "hlimas.project-picker"
+name = "Project Picker"
+version = "0.1.0"
+min_herdr_version = "0.7.5"
+description = "Find projects and open or focus their Herdr workspaces"
+platforms = ["macos", "linux"]
+
+[[actions]]
+id = "open"
+title = "Open project"
+description = "Search GitHub and eBay projects with fzf"
+command = ["bash", "open-picker.sh"]
+
+[[panes]]
+id = "picker"
+title = "Open project"
+description = "Select a project with fzf"
+placement = "popup"
+width = "80%"
+height = "80%"
+command = ["bash", "project-picker.sh"]
