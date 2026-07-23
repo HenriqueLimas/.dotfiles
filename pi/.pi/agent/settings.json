@@ -16,6 +16,7 @@
   },
   "showCacheMissNotices": true,
   "packages": [
-    "npm:pi-autoresearch"
+    "npm:pi-autoresearch",
+    "npm:@plannotator/pi-extension"
   ]
 }
