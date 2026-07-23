@@ -135,12 +135,6 @@ type = "plugin_action"
 command = "hlimas.project-picker.open"
 description = "find or open a project workspace"
 
-[[keys.command]]
-key = "prefix+d"
-type = "shell"
-command = "~/.config/herdr/scripts/open-hunk-diff.sh"
-description = "open Hunk diff in a side pane"
-
 # Legacy indexed shortcut config is still parsed for compatibility.
 # Prefer switch_tab, switch_workspace, and focus_agent for new configs.
 # [keys.indexed]
