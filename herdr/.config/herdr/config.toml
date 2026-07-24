@@ -77,7 +77,8 @@ auto_switch = false
 # open_worktree = ""    # optional, unset by default
 # remove_worktree = ""  # optional, unset by default; opens confirmation
 # rename_workspace = "prefix+shift+w"
-# close_workspace = "prefix+shift+d"
+# Workspace Manager owns closing so it can offer to keep or remove managed worktrees.
+close_workspace = ""
 previous_workspace = "ctrl+k"
 next_workspace = "ctrl+j"
 # previous_agent = ""     # optional, unset by default
@@ -133,7 +134,7 @@ focus_pane_right = "ctrl+l"
 key = "prefix+f"
 type = "plugin_action"
 command = "hlimas.project-picker.open"
-description = "find or open a project workspace"
+description = "create, open, or close a GitHub workspace"
 
 # Legacy indexed shortcut config is still parsed for compatibility.
 # Prefer switch_tab, switch_workspace, and focus_agent for new configs.
