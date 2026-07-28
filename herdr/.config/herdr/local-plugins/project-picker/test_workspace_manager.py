@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import subprocess
 import sys
 import tempfile
@@ -40,7 +41,7 @@ class WorkspaceManagerTest(unittest.TestCase):
             "translator",
         )
 
-    def test_group_repositories_separates_hosts_and_organizations(self):
+    def test_group_repositories_separates_hosts_and_owners(self):
         repos = [
             {
                 "host_key": "github",
@@ -173,7 +174,7 @@ class WorkspaceManagerTest(unittest.TestCase):
             label="GitHub",
             hostname="github.com",
             root=Path("/projects"),
-            public_org_repos_only=True,
+            public_repos_only=True,
         )
         repos = [{"full_name": "team/repo"}]
         with tempfile.TemporaryDirectory() as directory:
@@ -186,6 +187,73 @@ class WorkspaceManagerTest(unittest.TestCase):
                     workspace_manager.read_repository_cache(host),
                     repos,
                 )
+
+    def test_repository_cache_rejects_legacy_unversioned_catalog(self):
+        host = workspace_manager.Host(
+            key="github",
+            label="GitHub",
+            hostname="github.com",
+            root=Path("/projects"),
+            public_repos_only=True,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.dict(
+                workspace_manager.os.environ,
+                {"HERDR_WORKSPACE_STATE_DIR": directory},
+            ):
+                cache_path = workspace_manager.repository_cache_path(host)
+                cache_path.parent.mkdir(parents=True)
+                cache_path.write_text(
+                    '[{"full_name": "team/repo"}]\n',
+                    encoding="utf-8",
+                )
+                self.assertIsNone(
+                    workspace_manager.read_repository_cache(host)
+                )
+
+    def test_public_host_repos_include_user_and_organization_owners(self):
+        host = workspace_manager.Host(
+            key="github",
+            label="GitHub",
+            hostname="github.com",
+            root=Path("/projects"),
+            public_repos_only=True,
+        )
+        api_repos = [
+            {
+                "full_name": "HenriqueLimas/dotfiles",
+                "private": False,
+                "owner": {"type": "User"},
+            },
+            {
+                "full_name": "marko-js/marko",
+                "private": False,
+                "owner": {"type": "Organization"},
+            },
+            {
+                "full_name": "HenriqueLimas/private-repo",
+                "private": True,
+                "owner": {"type": "User"},
+            },
+        ]
+        completed = subprocess.CompletedProcess(
+            args=["gh"],
+            returncode=0,
+            stdout=json.dumps([api_repos]),
+            stderr="",
+        )
+        with mock.patch.object(
+            workspace_manager,
+            "run",
+            return_value=completed,
+        ) as run:
+            repos = workspace_manager.fetch_host_repos(host)
+
+        self.assertEqual(
+            [repo["full_name"] for repo in repos],
+            ["HenriqueLimas/dotfiles", "marko-js/marko"],
+        )
+        self.assertIn("visibility=public", run.call_args.args[0][-1])
 
     def test_branch_order_prefers_recent_then_default(self):
         repo = {
@@ -203,6 +271,113 @@ class WorkspaceManagerTest(unittest.TestCase):
                 history=history,
             ),
             ["feature", "main", "other"],
+        )
+
+    def test_parse_gpg_secret_keys_filters_by_email_and_signing_use(self):
+        def record(record_type, **values):
+            fields = [""] * 12
+            fields[0] = record_type
+            indexes = {
+                "validity": 1,
+                "key_id": 4,
+                "created": 5,
+                "expires": 6,
+                "value": 9,
+                "capabilities": 11,
+            }
+            for key, value in values.items():
+                fields[indexes[key]] = str(value)
+            return ":".join(fields)
+
+        output = "\n".join(
+            [
+                record(
+                    "sec",
+                    validity="u",
+                    key_id="AAAABBBBCCCCDDDD",
+                    created=1700000000,
+                    capabilities="c",
+                ),
+                record("fpr", value="A" * 40),
+                record(
+                    "uid",
+                    value=(
+                        "HenriqueLimas "
+                        "<henrique.ramos.limas@gmail.com>"
+                    ),
+                ),
+                record(
+                    "ssb",
+                    validity="u",
+                    expires=2000000000,
+                    capabilities="s",
+                ),
+                record(
+                    "sec",
+                    validity="u",
+                    key_id="EEEEFFFF00001111",
+                    created=1700000000,
+                    capabilities="sc",
+                ),
+                record("fpr", value="B" * 40),
+                record("uid", value="Other <other@example.com>"),
+                record(
+                    "sec",
+                    validity="e",
+                    key_id="2222333344445555",
+                    created=1600000000,
+                    capabilities="sc",
+                ),
+                record("fpr", value="C" * 40),
+                record(
+                    "uid",
+                    value="Old <henrique.ramos.limas@gmail.com>",
+                ),
+            ]
+        )
+
+        keys = workspace_manager.parse_gpg_secret_keys(
+            output,
+            "henrique.ramos.limas@gmail.com",
+            now=1800000000,
+        )
+
+        self.assertEqual(len(keys), 1)
+        self.assertEqual(keys[0]["fingerprint"], "A" * 40)
+        self.assertEqual(keys[0]["key_id"], "AAAABBBBCCCCDDDD")
+
+    def test_choose_gpg_signing_key_lists_matching_keys(self):
+        keys = [
+            {
+                "fingerprint": "A" * 40,
+                "key_id": "AAAABBBBCCCCDDDD",
+                "created": "1700000000",
+                "expires": "",
+                "uids": [
+                    "HenriqueLimas <henrique.ramos.limas@gmail.com>"
+                ],
+            }
+        ]
+        with (
+            mock.patch.object(
+                workspace_manager,
+                "gpg_secret_keys",
+                return_value=keys,
+            ),
+            mock.patch.object(
+                workspace_manager,
+                "choose_one",
+                return_value="A" * 40,
+            ) as choose_one,
+        ):
+            selected = workspace_manager.choose_gpg_signing_key(
+                "henrique.ramos.limas@gmail.com"
+            )
+
+        self.assertEqual(selected, "A" * 40)
+        self.assertIn(
+            "AAAABBBBCCCCDDDD",
+            choose_one.call_args.args[0][0][0],
         )
 
     def test_canonical_remote_supports_ssh_and_https(self):
@@ -248,7 +423,7 @@ class WorkspaceManagerTest(unittest.TestCase):
                     capture_output=True,
                 )
 
-            git("init", "-b", "main")
+            git("init", "--bare", "-b", "main")
             subprocess.run(
                 ["git", "-C", str(source), "fast-import", "--quiet"],
                 input=(
@@ -278,6 +453,11 @@ class WorkspaceManagerTest(unittest.TestCase):
                     "create": True,
                 },
             )
+            workspace_manager.configure_github_worktree(
+                source,
+                destination,
+                "A" * 40,
+            )
             branch = subprocess.run(
                 [
                     "git",
@@ -291,6 +471,42 @@ class WorkspaceManagerTest(unittest.TestCase):
                 capture_output=True,
             ).stdout.strip()
             self.assertEqual(branch, "feature/test")
+            worktree_config = {
+                key: value
+                for key, value in (
+                    line.split(" ", 1)
+                    for line in subprocess.run(
+                        [
+                            "git",
+                            "-C",
+                            str(destination),
+                            "config",
+                            "--worktree",
+                            "--get-regexp",
+                            (
+                                "^(user\\.(name|email|signingkey)"
+                                "|gpg\\.(format|program)"
+                                "|commit\\.gpgsign|core\\.bare)$"
+                            ),
+                        ],
+                        check=True,
+                        text=True,
+                        capture_output=True,
+                    ).stdout.splitlines()
+                )
+            }
+            self.assertEqual(
+                worktree_config,
+                {
+                    "core.bare": "false",
+                    "user.name": "HenriqueLimas",
+                    "user.email": "henrique.ramos.limas@gmail.com",
+                    "user.signingkey": "A" * 40,
+                    "gpg.format": "openpgp",
+                    "gpg.program": "gpg",
+                    "commit.gpgsign": "true",
+                },
+            )
 
             workspace_manager.remove_worktree(source, destination)
             self.assertFalse(destination.exists())

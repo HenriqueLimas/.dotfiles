@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from email.utils import getaddresses
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 from urllib.parse import urlparse
@@ -22,7 +23,11 @@ HERDR = os.environ.get("HERDR_BIN_PATH", "herdr")
 FZF = os.environ.get("FZF_BIN", "fzf")
 GH = os.environ.get("GH_BIN", "gh")
 GIT = os.environ.get("GIT_BIN", "git")
+GPG = os.environ.get("GPG_BIN", "gpg")
 PI_COMMAND = os.environ.get("HERDR_WORKSPACE_COMMAND", "pi --continue")
+REPOSITORY_CACHE_VERSION = 2
+GITHUB_AUTHOR_NAME = "HenriqueLimas"
+GITHUB_AUTHOR_EMAIL = "henrique.ramos.limas@gmail.com"
 
 
 class Cancelled(Exception):
@@ -39,7 +44,7 @@ class Host:
     label: str
     hostname: str
     root: Path
-    public_org_repos_only: bool
+    public_repos_only: bool
 
 
 def hosts() -> tuple[Host, Host]:
@@ -53,7 +58,7 @@ def hosts() -> tuple[Host, Host]:
                     "HERDR_GITHUB_PROJECTS_DIR", "~/Development/github"
                 )
             ).expanduser(),
-            public_org_repos_only=True,
+            public_repos_only=True,
         ),
         Host(
             key="ebay",
@@ -64,7 +69,7 @@ def hosts() -> tuple[Host, Host]:
             root=Path(
                 os.environ.get("HERDR_EBAY_PROJECTS_DIR", "~/Development/ebay")
             ).expanduser(),
-            public_org_repos_only=False,
+            public_repos_only=False,
         ),
     )
 
@@ -266,11 +271,18 @@ def read_repository_cache(host: Host) -> list[dict[str, Any]] | None:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    if not isinstance(value, list) or not all(
-        isinstance(repo, dict) and repo.get("full_name") for repo in value
+    if (
+        not isinstance(value, dict)
+        or value.get("version") != REPOSITORY_CACHE_VERSION
+        or not isinstance(value.get("repos"), list)
     ):
         return None
-    return value
+    repos = value["repos"]
+    if not all(
+        isinstance(repo, dict) and repo.get("full_name") for repo in repos
+    ):
+        return None
+    return repos
 
 
 def write_repository_cache(host: Host, repos: Sequence[dict[str, Any]]) -> None:
@@ -279,7 +291,15 @@ def write_repository_cache(host: Host, repos: Sequence[dict[str, Any]]) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = destination.with_suffix(".json.tmp")
         temporary.write_text(
-            json.dumps(list(repos), indent=2, sort_keys=True) + "\n",
+            json.dumps(
+                {
+                    "version": REPOSITORY_CACHE_VERSION,
+                    "repos": list(repos),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
             encoding="utf-8",
         )
         temporary.replace(destination)
@@ -329,8 +349,129 @@ def recent_sort_key(
     return (-history.get(key, 0.0), alphabetical.lower())
 
 
+def parse_gpg_secret_keys(
+    output: str, email: str, *, now: float | None = None
+) -> list[dict[str, Any]]:
+    current_time = time.time() if now is None else now
+    keys: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+
+    def field(fields: Sequence[str], index: int) -> str:
+        return fields[index] if len(fields) > index else ""
+
+    def finish_current() -> None:
+        if current is None or not current["fingerprint"]:
+            return
+        addresses = {
+            address.casefold()
+            for _, address in getaddresses(current["uids"])
+            if address
+        }
+        if (
+            email.casefold() in addresses
+            and current["has_active_signing_key"]
+        ):
+            keys.append(current)
+
+    for line in output.splitlines():
+        fields = line.split(":")
+        record_type = field(fields, 0)
+        if record_type == "sec":
+            finish_current()
+            current = {
+                "fingerprint": "",
+                "key_id": field(fields, 4),
+                "created": field(fields, 5),
+                "expires": field(fields, 6),
+                "uids": [],
+                "has_active_signing_key": False,
+            }
+        if current is None:
+            continue
+        if record_type == "fpr" and not current["fingerprint"]:
+            current["fingerprint"] = field(fields, 9)
+        elif record_type == "uid":
+            uid = clean_field(field(fields, 9))
+            if uid:
+                current["uids"].append(uid)
+        if record_type not in {"sec", "ssb"}:
+            continue
+        validity = field(fields, 1)
+        expires = field(fields, 6)
+        capabilities = field(fields, 11)
+        is_expired = expires.isdigit() and int(expires) <= current_time
+        if (
+            validity not in {"d", "e", "r"}
+            and not is_expired
+            and "s" in capabilities.casefold()
+            and "D" not in capabilities
+        ):
+            current["has_active_signing_key"] = True
+
+    finish_current()
+    return keys
+
+
+def gpg_secret_keys(email: str) -> list[dict[str, Any]]:
+    completed = run(
+        [
+            GPG,
+            "--batch",
+            "--with-colons",
+            "--fingerprint",
+            "--list-secret-keys",
+            email,
+        ]
+    )
+    return parse_gpg_secret_keys(completed.stdout, email)
+
+
+def gpg_key_label(key: dict[str, Any], email: str) -> str:
+    matching_uid = next(
+        (
+            uid
+            for uid in key["uids"]
+            if email.casefold()
+            in {
+                address.casefold()
+                for _, address in getaddresses([uid])
+                if address
+            }
+        ),
+        email,
+    )
+    key_id = key["key_id"] or key["fingerprint"][-16:]
+    created = (
+        time.strftime("%Y-%m-%d", time.localtime(int(key["created"])))
+        if str(key["created"]).isdigit()
+        else "unknown"
+    )
+    expiry = (
+        time.strftime("%Y-%m-%d", time.localtime(int(key["expires"])))
+        if str(key["expires"]).isdigit()
+        else "never"
+    )
+    return f"{matching_uid}  [{key_id}]  created {created}, expires {expiry}"
+
+
+def choose_gpg_signing_key(email: str) -> str:
+    keys = gpg_secret_keys(email)
+    if not keys:
+        raise WorkspaceError(
+            f"No usable secret GPG signing keys found for {email}."
+        )
+    return choose_one(
+        [
+            (gpg_key_label(key, email), str(key["fingerprint"]))
+            for key in keys
+        ],
+        prompt="GPG signing key> ",
+        header=f"Select the commit-signing key for {email}",
+    )
+
+
 def fetch_host_repos(host: Host) -> list[dict[str, Any]]:
-    visibility = "public" if host.public_org_repos_only else "all"
+    visibility = "public" if host.public_repos_only else "all"
     endpoint = (
         "/user/repos?affiliation=owner,collaborator,organization_member"
         f"&visibility={visibility}&sort=updated&per_page=100"
@@ -355,10 +496,7 @@ def fetch_host_repos(host: Host) -> list[dict[str, Any]]:
 
     result: list[dict[str, Any]] = []
     for repo in repos:
-        owner = repo.get("owner") or {}
-        if host.public_org_repos_only and (
-            repo.get("private") or owner.get("type") != "Organization"
-        ):
+        if host.public_repos_only and repo.get("private"):
             continue
         full_name = repo.get("full_name")
         if not full_name:
@@ -463,7 +601,7 @@ def choose_repositories(all_hosts: Sequence[Host]) -> list[dict[str, Any]]:
             )
         organization_rows.append(
             (
-                "↻  Refresh organizations and repositories",
+                "↻  Refresh owners and repositories",
                 "action:refresh",
             )
         )
@@ -489,8 +627,8 @@ def choose_repositories(all_hosts: Sequence[Host]) -> list[dict[str, Any]]:
 
         organization_choice = choose_one(
             organization_rows,
-            prompt="Organization> ",
-            header="Choose an organization; checked repositories are preserved",
+            prompt="Owner> ",
+            header="Choose an owner; checked repositories are preserved",
         )
         if organization_choice == "action:done":
             return list(selected.values())
@@ -520,7 +658,7 @@ def choose_repositories(all_hosts: Sequence[Host]) -> list[dict[str, Any]]:
         )
         while True:
             repo_rows: list[tuple[str, str]] = [
-                ("←  Back to organizations", "action:back")
+                ("←  Back to owners", "action:back")
             ]
             if selected:
                 repo_rows.append(
@@ -959,6 +1097,23 @@ def add_worktree(
     run(args)
 
 
+def configure_github_worktree(
+    source: Path, destination: Path, signing_key: str
+) -> None:
+    git_output(source, "config", "extensions.worktreeConfig", "true")
+    settings = (
+        ("core.bare", "false"),
+        ("user.name", GITHUB_AUTHOR_NAME),
+        ("user.email", GITHUB_AUTHOR_EMAIL),
+        ("user.signingKey", signing_key),
+        ("gpg.format", "openpgp"),
+        ("gpg.program", GPG),
+        ("commit.gpgSign", "true"),
+    )
+    for key, value in settings:
+        git_output(destination, "config", "--worktree", key, value)
+
+
 def remove_worktree(source: Path, destination: Path) -> None:
     run([GIT, "-C", str(source), "worktree", "remove", str(destination)])
     for parent in (destination.parent, destination.parent.parent):
@@ -971,6 +1126,10 @@ def remove_worktree(source: Path, destination: Path) -> None:
 def create_workspace(all_hosts: Sequence[Host]) -> None:
     require_commands(GH, GIT)
     selected_repos = choose_repositories(all_hosts)
+    github_signing_key = ""
+    if any(repo["host_key"] == "github" for repo in selected_repos):
+        require_commands(GPG)
+        github_signing_key = choose_gpg_signing_key(GITHUB_AUTHOR_EMAIL)
     host_by_key = {host.key: host for host in all_hosts}
     prepared: list[dict[str, Any]] = []
     for repo in selected_repos:
@@ -1018,6 +1177,12 @@ def create_workspace(all_hosts: Sequence[Host]) -> None:
                 Path(repo["path"]),
                 repo,
             )
+            if repo["host_key"] == "github":
+                configure_github_worktree(
+                    Path(repo["source"]),
+                    Path(repo["path"]),
+                    github_signing_key,
+                )
             created.append(repo)
     except (WorkspaceError, KeyboardInterrupt):
         for repo in reversed(created):
