@@ -25,6 +25,7 @@ GH = os.environ.get("GH_BIN", "gh")
 GIT = os.environ.get("GIT_BIN", "git")
 GPG = os.environ.get("GPG_BIN", "gpg")
 PI_COMMAND = os.environ.get("HERDR_WORKSPACE_COMMAND", "pi --continue")
+INSTALL_COMMAND = os.environ.get("HERDR_INSTALL_COMMAND", "ni")
 REPOSITORY_CACHE_VERSION = 2
 GITHUB_AUTHOR_NAME = "HenriqueLimas"
 GITHUB_AUTHOR_EMAIL = "henrique.ramos.limas@gmail.com"
@@ -239,6 +240,12 @@ def repo_dir_name(full_name: str) -> str:
 
 
 def suggested_workspace_name(repos: Sequence[dict[str, Any]]) -> str:
+    branch = next(
+        (str(repo["branch"]) for repo in repos if repo.get("branch")),
+        "",
+    )
+    if branch:
+        return branch
     names = [
         str(repo["full_name"]).rsplit("/", 1)[-1]
         for repo in repos
@@ -703,11 +710,13 @@ def choose_repositories(all_hosts: Sequence[Host]) -> list[dict[str, Any]]:
                     prompt=f"{owner}> ",
                     header=(
                         "Space checks/unchecks; Enter activates actions; "
-                        "Escape returns"
+                        "- or Escape returns"
                     ),
-                    expect=("space",),
+                    expect=("space", "-"),
                 )
             except Cancelled:
+                break
+            if pressed == "-":
                 break
             if pressed == "space" and repo_choice.startswith("repo:"):
                 repo = repos_by_key[repo_choice]
@@ -787,10 +796,12 @@ def git_output(source: Path, *args: str, check: bool = True) -> str:
     return run([GIT, "-C", str(source), *args], check=check).stdout.strip()
 
 
-def find_existing_source(host: Host, full_name: str) -> Path | None:
+def find_existing_source(
+    host: Host, full_name: str, *, hostname: str | None = None
+) -> Path | None:
     if not host.root.is_dir():
         return None
-    target = (host.hostname.lower(), full_name.lower())
+    target = ((hostname or host.hostname).lower(), full_name.lower())
     for candidate in host.root.iterdir():
         if candidate.name == ".herdr" or not candidate.is_dir():
             continue
@@ -804,64 +815,70 @@ def find_existing_source(host: Host, full_name: str) -> Path | None:
     return None
 
 
-def prepare_source(host: Host, repo: dict[str, Any]) -> Path:
+def prepare_source(
+    host: Host,
+    repo: dict[str, Any],
+    search_hosts: Sequence[Host] = (),
+) -> Path:
     host.root.mkdir(parents=True, exist_ok=True)
-    existing = find_existing_source(host, repo["full_name"])
-    if existing:
-        source = existing
-    else:
-        repositories_dir = host.root / ".herdr" / "repositories"
-        repositories_dir.mkdir(parents=True, exist_ok=True)
-        source = repositories_dir / f"{repo_dir_name(repo['full_name'])}.git"
-        created_cache = not source.exists()
-        if created_cache:
-            gh_env = dict(os.environ)
-            gh_env["GH_HOST"] = host.hostname
-            run(
-                [
-                    GH,
-                    "repo",
-                    "clone",
-                    repo["full_name"],
-                    str(source),
-                    "--",
-                    "--bare",
-                ],
-                env=gh_env,
-            )
-        elif not (source / "HEAD").exists():
-            raise WorkspaceError(
-                f"Repository cache is not a bare git repository: {source}"
-            )
+    candidate_hosts = (
+        host,
+        *(candidate for candidate in search_hosts if candidate.root != host.root),
+    )
+    for candidate in candidate_hosts:
+        existing = find_existing_source(
+            candidate,
+            repo["full_name"],
+            hostname=repo["hostname"],
+        )
+        if existing:
+            return existing
+
+    repositories_dir = host.root / ".herdr" / "repositories"
+    repositories_dir.mkdir(parents=True, exist_ok=True)
+    source = repositories_dir / f"{repo_dir_name(repo['full_name'])}.git"
+    created_cache = not source.exists()
+    if created_cache:
+        print(f"\nCloning {repo['full_name']}...", flush=True)
+        gh_env = dict(os.environ)
+        gh_env["GH_HOST"] = repo["hostname"]
         run(
             [
-                GIT,
-                "-C",
+                GH,
+                "repo",
+                "clone",
+                repo["full_name"],
                 str(source),
-                "config",
-                "remote.origin.fetch",
-                "+refs/heads/*:refs/remotes/origin/*",
-            ]
+                "--",
+                "--bare",
+                "--single-branch",
+                "--branch",
+                str(repo["default_branch"]),
+                "--filter=blob:none",
+                "--no-tags",
+            ],
+            env=gh_env,
         )
-    if not existing and created_cache:
-        git_output(source, "fetch", "--prune", "origin")
-        # A bare clone initially copies remote heads into local heads. Remove
-        # those seed refs after fetching origin/* so a selected existing
-        # branch is created from the current remote tip.
+    elif not (source / "HEAD").exists():
+        raise WorkspaceError(
+            f"Repository cache is not a bare git repository: {source}"
+        )
+    run(
+        [
+            GIT,
+            "-C",
+            str(source),
+            "config",
+            "remote.origin.fetch",
+            "+refs/heads/*:refs/remotes/origin/*",
+        ]
+    )
+    if created_cache:
+        # Bare clones seed local branch refs. Managed worktrees instead create
+        # or reset those refs from an explicitly fetched origin branch.
         for branch in local_branches(source):
             git_output(source, "update-ref", "-d", f"refs/heads/{branch}")
     return source
-
-
-def ref_names(source: Path, prefix: str) -> list[str]:
-    output = git_output(
-        source,
-        "for-each-ref",
-        "--format=%(refname:strip=3)",
-        prefix,
-        check=False,
-    )
-    return [line for line in output.splitlines() if line and line != "HEAD"]
 
 
 def local_branches(source: Path) -> set[str]:
@@ -884,49 +901,10 @@ def occupied_branches(source: Path) -> set[str]:
     }
 
 
-def local_branch_matches_origin(source: Path, branch: str) -> bool:
-    local = git_output(
-        source,
-        "rev-parse",
-        "--verify",
-        f"refs/heads/{branch}",
-        check=False,
-    )
-    remote = git_output(
-        source,
-        "rev-parse",
-        "--verify",
-        f"refs/remotes/origin/{branch}",
-        check=False,
-    )
-    return bool(local and remote and local == remote)
-
-
-def refresh_branches(source: Path) -> None:
-    git_output(source, "fetch", "--prune", "origin")
-
-
 def branch_history_key(repo: dict[str, Any], branch: str) -> str:
     return (
         f"branch:{repo['hostname']}/{repo['full_name']}/{branch}"
     ).lower()
-
-
-def order_branches(
-    branches: Iterable[str],
-    *,
-    repo: dict[str, Any],
-    history: dict[str, float],
-) -> list[str]:
-    default = repo["default_branch"]
-    return sorted(
-        set(branches),
-        key=lambda branch: (
-            -history.get(branch_history_key(repo, branch), 0.0),
-            0 if branch == default else 1,
-            branch.lower(),
-        ),
-    )
 
 
 def validate_branch_name(name: str) -> None:
@@ -938,109 +916,94 @@ def validate_branch_name(name: str) -> None:
         raise WorkspaceError(f"Invalid branch name: {name}")
 
 
+def fetch_remote_branch(source: Path, branch: str) -> None:
+    validate_branch_name(branch)
+    print(f"\nFetching latest origin/{branch}...", flush=True)
+    git_output(
+        source,
+        "fetch",
+        "--no-tags",
+        "origin",
+        f"+refs/heads/{branch}:refs/remotes/origin/{branch}",
+    )
+
+
+def remote_branch_exists(source: Path, branch: str) -> bool:
+    result = run(
+        [
+            GIT,
+            "-C",
+            str(source),
+            "ls-remote",
+            "--exit-code",
+            "--heads",
+            "origin",
+            branch,
+        ],
+        check=False,
+    )
+    if result.returncode == 0:
+        return True
+    if result.returncode == 2:
+        return False
+    detail = result.stderr.strip() or result.stdout.strip()
+    raise WorkspaceError(
+        detail or f"Could not check upstream branch: {branch}"
+    )
+
+
 def choose_branch(
     source: Path, repo: dict[str, Any]
 ) -> dict[str, str | bool]:
+    default = str(repo["default_branch"])
+    mode = choose_one(
+        [
+            ("Create a new branch", "__new__"),
+            (f"Use latest default branch ({default})", "__default__"),
+            ("Use another existing upstream branch", "__existing__"),
+        ],
+        prompt=f"{repo['full_name']} branch> ",
+        header=(
+            "Branches are fetched only after selection; type a branch name "
+            "instead of loading the full upstream branch list"
+        ),
+    )
     history = load_selection_history()
-    while True:
-        remote = order_branches(
-            ref_names(source, "refs/remotes/origin"),
-            repo=repo,
-            history=history,
-        )
-        local = local_branches(source)
-        occupied = occupied_branches(source)
-        available = order_branches(
-            (
-                branch
-                for branch in remote
-                if branch not in occupied
-                and (
-                    branch not in local
-                    or local_branch_matches_origin(source, branch)
-                )
-            ),
-            repo=repo,
-            history=history,
-        )
+    local = local_branches(source)
 
-        mode_rows: list[tuple[str, str]] = [
-            ("↻  Refresh branches from origin", "__refresh__")
-        ]
-        if available:
-            mode_rows.append(("Use an existing branch", "__existing__"))
-        if remote:
-            mode_rows.append(("Create a new branch", "__new__"))
-        mode = choose_one(
-            mode_rows,
-            prompt=f"{repo['full_name']} branch> ",
-            header="Choose branch mode or refresh the cached branch list",
-        )
-        if mode == "__refresh__":
-            try:
-                refresh_branches(source)
-            except WorkspaceError as error:
-                pause(str(error))
-            continue
-        if mode == "__existing__":
-            choice = choose_one(
-                [
-                    ("↻  Refresh branches from origin", "__refresh__"),
-                    *((branch, branch) for branch in available),
-                ],
-                prompt=f"{repo['full_name']} existing branch> ",
-                header=(
-                    "Remote branches only; checked-out or divergent local "
-                    "branches are hidden"
-                ),
-            )
-            if choice == "__refresh__":
-                try:
-                    refresh_branches(source)
-                except WorkspaceError as error:
-                    pause(str(error))
-                continue
-            mark_recent(history, branch_history_key(repo, choice))
-            return {
-                "branch": choice,
-                "start_point": f"origin/{choice}",
-                "create": choice not in local,
-                "reset": choice in local,
-            }
-
-        base = choose_one(
-            [
-                ("↻  Refresh branches from origin", "__refresh__"),
-                *(
-                    (
-                        f"{branch}  (default)"
-                        if branch == repo["default_branch"]
-                        else branch,
-                        branch,
-                    )
-                    for branch in remote
-                ),
-            ],
-            prompt=f"{repo['full_name']} base> ",
-            header="Select the starting point for the new branch",
-        )
-        if base == "__refresh__":
-            try:
-                refresh_branches(source)
-            except WorkspaceError as error:
-                pause(str(error))
-            continue
-        mark_recent(history, branch_history_key(repo, base))
+    if mode == "__new__":
         branch = prompt_text(f"New branch for {repo['full_name']}")
         validate_branch_name(branch)
-        if branch in local or branch in remote:
+        if branch in local or remote_branch_exists(source, branch):
             raise WorkspaceError(f"Branch already exists: {branch}")
+        base = prompt_text("Base upstream branch", default=default)
+        fetch_remote_branch(source, base)
+        mark_recent(history, branch_history_key(repo, base))
         mark_recent(history, branch_history_key(repo, branch))
         return {
             "branch": branch,
             "start_point": f"origin/{base}",
             "create": True,
         }
+
+    branch = (
+        default
+        if mode == "__default__"
+        else prompt_text("Existing upstream branch", default=default)
+    )
+    fetch_remote_branch(source, branch)
+    if branch in occupied_branches(source):
+        raise WorkspaceError(
+            f"Branch {branch!r} is already checked out. "
+            "Create a new branch for this workspace instead."
+        )
+    mark_recent(history, branch_history_key(repo, branch))
+    return {
+        "branch": branch,
+        "start_point": f"origin/{branch}",
+        "create": branch not in local,
+        "reset": branch in local,
+    }
 
 
 def manifests_dir() -> Path:
@@ -1114,8 +1077,14 @@ def configure_github_worktree(
         git_output(destination, "config", "--worktree", key, value)
 
 
-def remove_worktree(source: Path, destination: Path) -> None:
-    run([GIT, "-C", str(source), "worktree", "remove", str(destination)])
+def remove_worktree(
+    source: Path, destination: Path, *, force: bool = False
+) -> None:
+    args = [GIT, "-C", str(source), "worktree", "remove"]
+    if force:
+        args.append("--force")
+    args.append(str(destination))
+    run(args)
     for parent in (destination.parent, destination.parent.parent):
         try:
             parent.rmdir()
@@ -1134,19 +1103,28 @@ def create_workspace(all_hosts: Sequence[Host]) -> None:
     prepared: list[dict[str, Any]] = []
     for repo in selected_repos:
         host = host_by_key[repo["host_key"]]
-        source = prepare_source(host, repo)
+        source = prepare_source(host, repo, all_hosts)
         branch = choose_branch(source, repo)
+        workspace_root = next(
+            (
+                candidate.root
+                for candidate in all_hosts
+                if path_contains(candidate.root, source)
+            ),
+            host.root,
+        )
         prepared.append(
             {
                 **repo,
                 **branch,
                 "source": str(source),
+                "workspace_root": str(workspace_root),
             }
         )
 
     name = prompt_text(
         "Workspace name",
-        default=suggested_workspace_name(selected_repos),
+        default=suggested_workspace_name(prepared),
     )
     slug = slugify(name)
     if manifest_path(slug).exists():
@@ -1154,9 +1132,8 @@ def create_workspace(all_hosts: Sequence[Host]) -> None:
 
     seen_destinations: set[Path] = set()
     for repo in prepared:
-        host = host_by_key[repo["host_key"]]
         destination = (
-            host.root
+            Path(repo["workspace_root"])
             / ".herdr"
             / "workspaces"
             / slug
@@ -1271,6 +1248,32 @@ def active_workspace_for(paths: Sequence[Path]) -> str:
     return ""
 
 
+def start_dependency_install(cwd: Path) -> None:
+    command_parts = shlex.split(INSTALL_COMMAND)
+    if not command_parts:
+        return
+    if shutil.which(command_parts[0]) is None:
+        print(
+            f"Warning: dependency installer not found: {command_parts[0]}",
+            file=sys.stderr,
+        )
+        return
+    try:
+        subprocess.Popen(
+            command_parts,
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as error:
+        print(
+            f"Warning: failed to start {INSTALL_COMMAND!r} in {cwd}: {error}",
+            file=sys.stderr,
+        )
+
+
 def start_pi(pane_id: str, cwd: Path) -> None:
     command_parts = shlex.split(PI_COMMAND)
     if not command_parts:
@@ -1319,6 +1322,7 @@ def create_herdr_workspace(
     pane_id = first_nested(created, "pane_id")
     if not workspace_id or not pane_id:
         raise WorkspaceError("Herdr did not return a workspace and root pane.")
+    start_dependency_install(first_path)
     start_pi(pane_id, first_path)
 
     for label, path in directories[1:]:
@@ -1340,6 +1344,7 @@ def create_herdr_workspace(
         tab_pane_id = first_nested(tab, "pane_id")
         if not tab_pane_id:
             raise WorkspaceError(f"Herdr did not return a pane for {label}.")
+        start_dependency_install(path)
         start_pi(tab_pane_id, path)
 
 
@@ -1379,11 +1384,7 @@ def local_projects(all_hosts: Sequence[Host]) -> list[tuple[Host, Path]]:
         if not host.root.is_dir():
             continue
         for path in host.root.iterdir():
-            if (
-                path.name.startswith(".")
-                or not path.is_dir()
-                or not (path / ".git").exists()
-            ):
+            if path.name == ".herdr" or not path.is_dir():
                 continue
             projects.append((host, path))
     return sorted(projects, key=lambda item: (item[0].label, item[1].name.lower()))
@@ -1480,29 +1481,35 @@ def workspace_records() -> list[dict[str, Any]]:
     return [record for record in records if isinstance(record, dict)]
 
 
-def choose_workspace_to_close() -> str:
+def current_workspace_to_close() -> dict[str, Any]:
+    records = workspace_records()
+    focused = next(
+        (
+            record
+            for record in records
+            if record.get("focused") and record.get("workspace_id")
+        ),
+        None,
+    )
+    if focused:
+        return focused
+
     active = (
         os.environ.get("HERDR_ACTIVE_WORKSPACE_ID")
         or os.environ.get("HERDR_WORKSPACE_ID")
         or ""
     )
-    records = workspace_records()
-    ids = {
-        str(record.get("workspace_id"))
-        for record in records
-        if record.get("workspace_id")
-    }
-    if active and active in ids:
-        return active
-    rows = []
-    for record in records:
-        workspace_id = str(record.get("workspace_id") or "")
-        label = clean_field(
-            record.get("label") or record.get("name") or workspace_id
-        )
-        if workspace_id:
-            rows.append((label, workspace_id))
-    return choose_one(rows, prompt="Close> ")
+    from_environment = next(
+        (
+            record
+            for record in records
+            if str(record.get("workspace_id") or "") == active
+        ),
+        None,
+    )
+    if from_environment:
+        return from_environment
+    raise WorkspaceError("Herdr did not report a current workspace to close.")
 
 
 def manifest_for_workspace(
@@ -1528,80 +1535,244 @@ def manifest_for_workspace(
     return None
 
 
-def dirty_worktrees(manifest: dict[str, Any]) -> list[Path]:
-    dirty = []
-    for repo in manifest["repos"]:
-        path = Path(repo["path"])
-        if not path.is_dir():
-            continue
-        status = git_output(
-            path,
-            "status",
-            "--porcelain",
-            "--untracked-files=normal",
-        )
-        if status:
-            dirty.append(path)
-    return dirty
-
-
 def delete_managed_workspace(manifest: dict[str, Any]) -> None:
     require_commands(GIT)
-    dirty = dirty_worktrees(manifest)
-    if dirty:
-        formatted = "\n".join(f"  {path}" for path in dirty)
-        raise WorkspaceError(
-            "Refusing to delete worktrees with uncommitted or untracked files:\n"
-            + formatted
-        )
     for repo in manifest["repos"]:
         path = Path(repo["path"])
         if path.exists():
-            remove_worktree(Path(repo["source"]), path)
+            remove_worktree(Path(repo["source"]), path, force=True)
     path = manifest_path(manifest["slug"])
     if path.exists():
         path.unlink()
 
 
-def close_workspace() -> None:
-    workspace_id = choose_workspace_to_close()
+def project_folders_for_workspace(
+    workspace_id: str, all_hosts: Sequence[Host]
+) -> list[Path]:
+    folders: set[Path] = set()
+    workspace_cwds = [
+        Path(pane["cwd"])
+        for pane in pane_records()
+        if str(pane.get("workspace_id") or "") == workspace_id
+        and pane.get("cwd")
+    ]
+    for host in all_hosts:
+        try:
+            root = host.root.resolve()
+        except OSError:
+            continue
+        for cwd in workspace_cwds:
+            try:
+                relative = cwd.resolve().relative_to(root)
+            except (OSError, ValueError):
+                continue
+            if not relative.parts or relative.parts[0] == ".herdr":
+                continue
+            project = host.root / relative.parts[0]
+            if project.is_dir():
+                folders.add(project)
+    return sorted(folders, key=lambda path: str(path).lower())
+
+
+def delete_project_folders(
+    folders: Sequence[Path], all_hosts: Sequence[Host]
+) -> None:
+    allowed_roots = {host.root.resolve() for host in all_hosts}
+    for folder in folders:
+        if (
+            folder.name == ".herdr"
+            or folder.parent.resolve() not in allowed_roots
+        ):
+            raise WorkspaceError(
+                f"Refusing to delete a folder outside configured roots: {folder}"
+            )
+        try:
+            if folder.is_symlink():
+                folder.unlink()
+            elif folder.exists():
+                shutil.rmtree(folder)
+        except OSError as error:
+            raise WorkspaceError(
+                f"Could not completely delete {folder}: {error}"
+            ) from error
+
+
+def folder_choice_labels(count: int) -> tuple[str, str]:
+    noun = "folder" if count == 1 else "folders"
+    return (
+        f"Close workspace and keep {noun}",
+        f"Close workspace and permanently delete {noun}",
+    )
+
+
+def background_task_log_path() -> Path:
+    return state_root() / "background-tasks.log"
+
+
+def start_background_workspace_deletion(
+    workspace_id: str,
+    manifest: dict[str, Any] | None,
+    folders: Sequence[Path],
+) -> None:
+    if manifest:
+        action = "_background-delete-managed"
+        arguments = [workspace_id, str(manifest["slug"])]
+    else:
+        action = "_background-delete-projects"
+        arguments = [workspace_id, *(str(folder) for folder in folders)]
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        action,
+        *arguments,
+    ]
+    log_path = background_task_log_path()
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("ab") as log:
+            subprocess.Popen(
+                command,
+                cwd=Path.home(),
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+    except OSError as error:
+        raise WorkspaceError(
+            f"Could not start background workspace deletion: {error}"
+        ) from error
+
+
+def perform_background_deletion(
+    action: str, arguments: Sequence[str]
+) -> None:
+    if len(arguments) < 2:
+        raise WorkspaceError("Background deletion arguments are incomplete.")
+    workspace_id = arguments[0]
+    run([HERDR, "workspace", "close", workspace_id])
+    if action == "_background-delete-managed":
+        slug = arguments[1]
+        manifest = next(
+            (
+                manifest
+                for manifest in load_manifests()
+                if str(manifest.get("slug") or "") == slug
+            ),
+            None,
+        )
+        if manifest is None:
+            raise WorkspaceError(
+                f"Managed workspace manifest no longer exists: {slug}"
+            )
+        delete_managed_workspace(manifest)
+        return
+    if action == "_background-delete-projects":
+        delete_project_folders(
+            [Path(folder) for folder in arguments[1:]],
+            hosts(),
+        )
+        return
+    raise WorkspaceError(f"Unknown background deletion action: {action}")
+
+
+def close_workspace(workspace: dict[str, Any] | None = None) -> None:
+    workspace = workspace or current_workspace_to_close()
+    workspace_id = str(workspace["workspace_id"])
+    label = clean_field(
+        workspace.get("label") or workspace.get("name") or workspace_id
+    )
+    all_hosts = hosts()
     manifest = manifest_for_workspace(workspace_id, load_manifests())
     if manifest:
+        folders = [
+            Path(repo["path"])
+            for repo in manifest["repos"]
+            if repo.get("path")
+        ]
+    else:
+        folders = project_folders_for_workspace(workspace_id, all_hosts)
+
+    if folders:
+        keep_label, delete_label = folder_choice_labels(len(folders))
+        folder_list = "\n".join(str(folder) for folder in folders)
         choice = choose_one(
             [
-                ("Keep workspace folders and close Herdr workspace", "keep"),
-                (
-                    "Delete clean managed worktrees and close Herdr workspace",
-                    "delete",
-                ),
+                (keep_label, "keep"),
+                (delete_label, "delete"),
                 ("Cancel", "cancel"),
             ],
-            prompt="Close workspace> ",
-            header=manifest["name"],
+            prompt="Close current workspace> ",
+            header=f"{label}\n{folder_list}",
         )
-        if choice == "cancel":
-            raise Cancelled
-        if choice == "delete":
-            delete_managed_workspace(manifest)
     else:
         choice = choose_one(
             [
-                ("Keep project folder and close Herdr workspace", "keep"),
+                ("Close current workspace", "keep"),
                 ("Cancel", "cancel"),
             ],
-            prompt="Close workspace> ",
-            header="This folder is not manager-owned and will not be deleted",
+            prompt="Close current workspace> ",
+            header=f"{label}\nNo project folder was found under configured roots.",
         )
-        if choice == "cancel":
-            raise Cancelled
+
+    if choice == "cancel":
+        raise Cancelled
+    if choice == "delete":
+        start_background_workspace_deletion(
+            workspace_id,
+            manifest,
+            folders,
+        )
+        return
     run([HERDR, "workspace", "close", workspace_id])
 
 
-def main() -> int:
+def close_current_pane_or_workspace() -> None:
+    workspace = current_workspace_to_close()
+    workspace_id = str(workspace["workspace_id"])
+    pane_count = int(workspace.get("pane_count") or 0)
+    if pane_count <= 1:
+        close_workspace(workspace)
+        return
+
+    panes = [
+        pane
+        for pane in pane_records()
+        if str(pane.get("workspace_id") or "") == workspace_id
+    ]
+    pane = next((pane for pane in panes if pane.get("focused")), None)
+    if pane is None:
+        environment_pane_id = os.environ.get("HERDR_PANE_ID", "")
+        pane = next(
+            (
+                pane
+                for pane in panes
+                if str(pane.get("pane_id") or "") == environment_pane_id
+            ),
+            None,
+        )
+    if pane is None or not pane.get("pane_id"):
+        raise WorkspaceError("Herdr did not report a current pane to close.")
+    run([HERDR, "pane", "close", str(pane["pane_id"])])
+
+
+def main(
+    action: str = "open", action_arguments: Sequence[str] = ()
+) -> int:
     try:
+        if action.startswith("_background-delete-"):
+            require_commands(HERDR)
+            perform_background_deletion(action, action_arguments)
+            return 0
         require_commands(HERDR, FZF)
-        all_hosts = hosts()
-        open_workspace(all_hosts)
+        if action == "open":
+            open_workspace(hosts())
+        elif action == "close":
+            close_workspace()
+        elif action == "close-pane":
+            close_current_pane_or_workspace()
+        else:
+            raise WorkspaceError(f"Unknown workspace action: {action}")
         return 0
     except Cancelled:
         return 0
@@ -1613,4 +1784,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    action = sys.argv[1] if len(sys.argv) > 1 else "open"
+    raise SystemExit(main(action, sys.argv[2:]))

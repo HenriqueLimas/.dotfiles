@@ -24,7 +24,20 @@ class WorkspaceManagerTest(unittest.TestCase):
         with self.assertRaises(workspace_manager.WorkspaceError):
             workspace_manager.slugify("...")
 
-    def test_suggested_workspace_name_uses_selected_repo_names(self):
+    def test_suggested_workspace_name_prefers_branch_name(self):
+        self.assertEqual(
+            workspace_manager.suggested_workspace_name(
+                [
+                    {
+                        "full_name": "open-source/marko",
+                        "branch": "feature/new-parser",
+                    }
+                ]
+            ),
+            "feature/new-parser",
+        )
+
+    def test_suggested_workspace_name_falls_back_to_repo_names(self):
         self.assertEqual(
             workspace_manager.suggested_workspace_name(
                 [
@@ -39,6 +52,57 @@ class WorkspaceManagerTest(unittest.TestCase):
                 [{"full_name": "team/translator"}]
             ),
             "translator",
+        )
+
+    def test_dependency_install_starts_ni_without_waiting(self):
+        cwd = Path("/workspace")
+        with (
+            mock.patch.object(workspace_manager, "INSTALL_COMMAND", "ni"),
+            mock.patch.object(
+                workspace_manager.shutil,
+                "which",
+                return_value="/usr/local/bin/ni",
+            ),
+            mock.patch.object(
+                workspace_manager.subprocess, "Popen"
+            ) as popen,
+        ):
+            workspace_manager.start_dependency_install(cwd)
+
+        popen.assert_called_once_with(
+            ["ni"],
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+    def test_new_herdr_workspace_installs_each_directory_in_background(self):
+        first = Path("/workspace/first")
+        second = Path("/workspace/second")
+        with (
+            mock.patch.object(
+                workspace_manager,
+                "json_command",
+                side_effect=[
+                    {"workspace_id": "workspace", "pane_id": "pane-1"},
+                    {"pane_id": "pane-2"},
+                ],
+            ),
+            mock.patch.object(
+                workspace_manager, "start_dependency_install"
+            ) as install,
+            mock.patch.object(workspace_manager, "start_pi"),
+        ):
+            workspace_manager.create_herdr_workspace(
+                name="feature",
+                directories=[("first", first), ("second", second)],
+            )
+
+        self.assertEqual(
+            install.call_args_list,
+            [mock.call(first), mock.call(second)],
         )
 
     def test_group_repositories_separates_hosts_and_owners(self):
@@ -82,18 +146,13 @@ class WorkspaceManagerTest(unittest.TestCase):
         )
         self.assertEqual(recent_groups[0][0], ("github", "marko-js"))
 
-    def test_choose_branch_selects_mode_before_listing_existing_branches(self):
+    def test_choose_branch_fetches_only_latest_default_branch(self):
         repo = {
             "hostname": "github.com",
             "full_name": "team/repo",
             "default_branch": "main",
         }
         with (
-            mock.patch.object(
-                workspace_manager,
-                "ref_names",
-                return_value=["feature", "main"],
-            ),
             mock.patch.object(
                 workspace_manager,
                 "local_branches",
@@ -106,14 +165,13 @@ class WorkspaceManagerTest(unittest.TestCase):
             ),
             mock.patch.object(
                 workspace_manager,
-                "local_branch_matches_origin",
-                return_value=True,
-            ),
+                "choose_one",
+                return_value="__default__",
+            ) as choose_one,
             mock.patch.object(
                 workspace_manager,
-                "choose_one",
-                side_effect=["__existing__", "feature"],
-            ) as choose_one,
+                "fetch_remote_branch",
+            ) as fetch,
             mock.patch.object(
                 workspace_manager,
                 "load_selection_history",
@@ -126,28 +184,67 @@ class WorkspaceManagerTest(unittest.TestCase):
         self.assertEqual(
             selection,
             {
-                "branch": "feature",
-                "start_point": "origin/feature",
-                "create": True,
-                "reset": False,
+                "branch": "main",
+                "start_point": "origin/main",
+                "create": False,
+                "reset": True,
             },
         )
         self.assertEqual(
-            choose_one.call_args_list[0].args[0],
+            choose_one.call_args.args[0],
             [
-                ("↻  Refresh branches from origin", "__refresh__"),
-                ("Use an existing branch", "__existing__"),
                 ("Create a new branch", "__new__"),
+                ("Use latest default branch (main)", "__default__"),
+                ("Use another existing upstream branch", "__existing__"),
             ],
         )
+        fetch.assert_called_once_with(Path("/repo"), "main")
+
+    def test_new_branch_accepts_typed_non_default_base(self):
+        repo = {
+            "hostname": "github.com",
+            "full_name": "team/repo",
+            "default_branch": "main",
+        }
+        with (
+            mock.patch.object(
+                workspace_manager, "choose_one", return_value="__new__"
+            ),
+            mock.patch.object(
+                workspace_manager,
+                "prompt_text",
+                side_effect=["feature/new", "release"],
+            ),
+            mock.patch.object(
+                workspace_manager, "local_branches", return_value=set()
+            ),
+            mock.patch.object(
+                workspace_manager,
+                "remote_branch_exists",
+                return_value=False,
+            ),
+            mock.patch.object(
+                workspace_manager, "fetch_remote_branch"
+            ) as fetch,
+            mock.patch.object(
+                workspace_manager,
+                "load_selection_history",
+                return_value={},
+            ),
+            mock.patch.object(workspace_manager, "mark_recent"),
+            mock.patch.object(workspace_manager, "validate_branch_name"),
+        ):
+            selection = workspace_manager.choose_branch(Path("/repo"), repo)
+
         self.assertEqual(
-            choose_one.call_args_list[1].args[0],
-            [
-                ("↻  Refresh branches from origin", "__refresh__"),
-                ("main", "main"),
-                ("feature", "feature"),
-            ],
+            selection,
+            {
+                "branch": "feature/new",
+                "start_point": "origin/release",
+                "create": True,
+            },
         )
+        fetch.assert_called_once_with(Path("/repo"), "release")
 
     def test_fzf_event_reports_space_separately_from_selected_row(self):
         completed = subprocess.CompletedProcess(
@@ -167,6 +264,73 @@ class WorkspaceManagerTest(unittest.TestCase):
                 expect=("space",),
             )
         self.assertEqual((pressed, selected), ("space", "repo:0"))
+
+    def test_fzf_event_reports_minus_separately_from_selected_row(self):
+        completed = subprocess.CompletedProcess(
+            args=["fzf"],
+            returncode=0,
+            stdout="-\n[x] repo\trepo:0\n",
+            stderr="",
+        )
+        with mock.patch.object(
+            workspace_manager.subprocess,
+            "run",
+            return_value=completed,
+        ):
+            pressed, selected = workspace_manager.choose_one_event(
+                [("[ ] repo", "repo:0")],
+                prompt="Repo> ",
+                expect=("space", "-"),
+            )
+        self.assertEqual((pressed, selected), ("-", "repo:0"))
+
+    def test_minus_returns_from_repositories_to_owner_page(self):
+        host = workspace_manager.Host(
+            key="github",
+            label="GitHub",
+            hostname="github.com",
+            root=Path("/projects"),
+            public_repos_only=True,
+        )
+        repos = [
+            {
+                "host_key": "github",
+                "host_label": "GitHub",
+                "hostname": "github.com",
+                "full_name": "team/repo",
+                "description": "",
+            }
+        ]
+        with (
+            mock.patch.object(
+                workspace_manager,
+                "load_repository_catalog",
+                return_value=repos,
+            ),
+            mock.patch.object(
+                workspace_manager,
+                "load_selection_history",
+                return_value={},
+            ),
+            mock.patch.object(
+                workspace_manager,
+                "choose_one",
+                side_effect=[
+                    "organization:0",
+                    workspace_manager.Cancelled(),
+                ],
+            ) as choose_one,
+            mock.patch.object(
+                workspace_manager,
+                "choose_one_event",
+                return_value=("-", "repo:0"),
+            ),
+            mock.patch.object(workspace_manager, "mark_recent"),
+        ):
+            with self.assertRaises(workspace_manager.Cancelled):
+                workspace_manager.choose_repositories((host,))
+
+        self.assertEqual(choose_one.call_count, 2)
 
     def test_repository_cache_round_trip(self):
         host = workspace_manager.Host(
@@ -255,22 +419,22 @@ class WorkspaceManagerTest(unittest.TestCase):
         )
         self.assertIn("visibility=public", run.call_args.args[0][-1])
 
-    def test_branch_order_prefers_recent_then_default(self):
-        repo = {
-            "hostname": "github.com",
-            "full_name": "team/repo",
-            "default_branch": "main",
-        }
-        history = {
-            workspace_manager.branch_history_key(repo, "feature"): 10.0
-        }
-        self.assertEqual(
-            workspace_manager.order_branches(
-                ["other", "main", "feature"],
-                repo=repo,
-                history=history,
-            ),
-            ["feature", "main", "other"],
+    def test_fetch_remote_branch_fetches_only_requested_branch(self):
+        source = Path("/repo")
+        with (
+            mock.patch.object(workspace_manager, "validate_branch_name"),
+            mock.patch.object(
+                workspace_manager, "git_output"
+            ) as git_output,
+        ):
+            workspace_manager.fetch_remote_branch(source, "feature/test")
+
+        git_output.assert_called_once_with(
+            source,
+            "fetch",
+            "--no-tags",
+            "origin",
+            "+refs/heads/feature/test:refs/remotes/origin/feature/test",
         )
 
     def test_parse_gpg_secret_keys_filters_by_email_and_signing_use(self):
@@ -392,6 +556,85 @@ class WorkspaceManagerTest(unittest.TestCase):
             ("github.corp.ebay.com", "org/repo"),
         )
 
+    def test_prepare_source_reuses_existing_repository_without_fetching(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "repo"
+            source.mkdir()
+            host = workspace_manager.Host(
+                key="github",
+                label="GitHub",
+                hostname="github.com",
+                root=root,
+                public_repos_only=True,
+            )
+            with (
+                mock.patch.object(
+                    workspace_manager,
+                    "find_existing_source",
+                    return_value=source,
+                ),
+                mock.patch.object(
+                    workspace_manager, "git_output"
+                ) as git_output,
+            ):
+                result = workspace_manager.prepare_source(
+                    host,
+                    {
+                        "hostname": "github.com",
+                        "full_name": "team/repo",
+                        "default_branch": "main",
+                    },
+                )
+
+        self.assertEqual(result, source)
+        git_output.assert_not_called()
+
+    def test_prepare_source_searches_both_development_roots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            github = workspace_manager.Host(
+                key="github",
+                label="GitHub",
+                hostname="github.com",
+                root=root / "github",
+                public_repos_only=True,
+            )
+            ebay = workspace_manager.Host(
+                key="ebay",
+                label="eBay",
+                hostname="github.corp.ebay.com",
+                root=root / "ebay",
+                public_repos_only=False,
+            )
+            source = ebay.root / "evo-web"
+            with mock.patch.object(
+                workspace_manager,
+                "find_existing_source",
+                side_effect=[None, source],
+            ) as find:
+                result = workspace_manager.prepare_source(
+                    github,
+                    {
+                        "hostname": "github.com",
+                        "full_name": "eBay/evo-web",
+                        "default_branch": "main",
+                    },
+                    (github, ebay),
+                )
+
+        self.assertEqual(result, source)
+        self.assertEqual(
+            [call.args[0] for call in find.call_args_list],
+            [github, ebay],
+        )
+        self.assertTrue(
+            all(
+                call.kwargs["hostname"] == "github.com"
+                for call in find.call_args_list
+            )
+        )
+
     def test_flatten_pages_accepts_gh_slurp_shape(self):
         pages = [[{"full_name": "one/a"}], [{"full_name": "two/b"}]]
         self.assertEqual(
@@ -408,6 +651,292 @@ class WorkspaceManagerTest(unittest.TestCase):
             sibling.mkdir()
             self.assertTrue(workspace_manager.path_contains(root, child))
             self.assertFalse(workspace_manager.path_contains(root, sibling))
+
+    def test_local_projects_includes_every_folder_except_herdr_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            git_repo = root / "repo"
+            plain_folder = root / "notes"
+            hidden_repo = root / ".dotfiles"
+            herdr_state = root / ".herdr"
+            for path in (git_repo, plain_folder, hidden_repo, herdr_state):
+                path.mkdir()
+            (git_repo / ".git").mkdir()
+            (root / "README.md").touch()
+            host = workspace_manager.Host(
+                key="github",
+                label="GitHub",
+                hostname="github.com",
+                root=root,
+                public_repos_only=True,
+            )
+
+            projects = workspace_manager.local_projects((host,))
+
+            self.assertEqual(
+                [path.name for _, path in projects],
+                [".dotfiles", "notes", "repo"],
+            )
+
+    def test_current_workspace_to_close_uses_focused_workspace(self):
+        with (
+            mock.patch.object(
+                workspace_manager,
+                "workspace_records",
+                return_value=[
+                    {"workspace_id": "other", "focused": False},
+                    {
+                        "workspace_id": "current",
+                        "label": "Current project",
+                        "focused": True,
+                    },
+                ],
+            ),
+            mock.patch.dict(
+                workspace_manager.os.environ,
+                {"HERDR_WORKSPACE_ID": "other"},
+            ),
+        ):
+            workspace = workspace_manager.current_workspace_to_close()
+
+        self.assertEqual(workspace["workspace_id"], "current")
+
+    def test_project_folders_are_derived_from_current_workspace_panes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            current = root / "current"
+            other = root / "other"
+            (current / "src").mkdir(parents=True)
+            other.mkdir()
+            host = workspace_manager.Host(
+                key="github",
+                label="GitHub",
+                hostname="github.com",
+                root=root,
+                public_repos_only=True,
+            )
+            with mock.patch.object(
+                workspace_manager,
+                "pane_records",
+                return_value=[
+                    {"workspace_id": "current", "cwd": str(current / "src")},
+                    {"workspace_id": "other", "cwd": str(other)},
+                ],
+            ):
+                folders = workspace_manager.project_folders_for_workspace(
+                    "current", (host,)
+                )
+
+        self.assertEqual(folders, [current])
+
+    def test_close_workspace_queues_current_folder_deletion(self):
+        folder = Path("/projects/current")
+        hosts = (mock.sentinel.host,)
+        with (
+            mock.patch.object(
+                workspace_manager,
+                "current_workspace_to_close",
+                return_value={
+                    "workspace_id": "current",
+                    "label": "Current project",
+                },
+            ),
+            mock.patch.object(workspace_manager, "hosts", return_value=hosts),
+            mock.patch.object(workspace_manager, "load_manifests", return_value=[]),
+            mock.patch.object(
+                workspace_manager,
+                "manifest_for_workspace",
+                return_value=None,
+            ),
+            mock.patch.object(
+                workspace_manager,
+                "project_folders_for_workspace",
+                return_value=[folder],
+            ),
+            mock.patch.object(
+                workspace_manager,
+                "choose_one",
+                return_value="delete",
+            ) as choose_one,
+            mock.patch.object(
+                workspace_manager,
+                "start_background_workspace_deletion",
+            ) as start_deletion,
+            mock.patch.object(workspace_manager, "run") as run,
+        ):
+            workspace_manager.close_workspace()
+
+        self.assertEqual(
+            choose_one.call_args.args[0],
+            [
+                ("Close workspace and keep folder", "keep"),
+                ("Close workspace and permanently delete folder", "delete"),
+                ("Cancel", "cancel"),
+            ],
+        )
+        self.assertEqual(
+            choose_one.call_args.kwargs["header"],
+            "Current project\n/projects/current",
+        )
+        start_deletion.assert_called_once_with(
+            "current",
+            None,
+            [folder],
+        )
+        run.assert_not_called()
+
+    def test_background_deletion_is_detached_and_logged(self):
+        folder = Path("/projects/current")
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.dict(
+                workspace_manager.os.environ,
+                {"HERDR_WORKSPACE_STATE_DIR": directory},
+            ),
+            mock.patch.object(
+                workspace_manager.subprocess, "Popen"
+            ) as popen,
+        ):
+            workspace_manager.start_background_workspace_deletion(
+                "current",
+                None,
+                [folder],
+            )
+
+        command = popen.call_args.args[0]
+        self.assertEqual(
+            command,
+            [
+                sys.executable,
+                str(Path(workspace_manager.__file__).resolve()),
+                "_background-delete-projects",
+                "current",
+                str(folder),
+            ],
+        )
+        self.assertEqual(popen.call_args.kwargs["cwd"], Path.home())
+        self.assertEqual(
+            popen.call_args.kwargs["stdin"], subprocess.DEVNULL
+        )
+        self.assertEqual(
+            popen.call_args.kwargs["stderr"], subprocess.STDOUT
+        )
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+
+    def test_background_worker_closes_workspace_before_deleting_folder(self):
+        folder = Path("/projects/current")
+        all_hosts = (mock.sentinel.host,)
+        events = []
+
+        def record_close(*_args, **_kwargs):
+            events.append("close")
+
+        def record_delete(*_args, **_kwargs):
+            events.append("delete")
+
+        with (
+            mock.patch.object(
+                workspace_manager, "run", side_effect=record_close
+            ) as run,
+            mock.patch.object(
+                workspace_manager,
+                "delete_project_folders",
+                side_effect=record_delete,
+            ) as delete,
+            mock.patch.object(
+                workspace_manager, "hosts", return_value=all_hosts
+            ),
+        ):
+            workspace_manager.perform_background_deletion(
+                "_background-delete-projects",
+                ["current", str(folder)],
+            )
+
+        self.assertEqual(events, ["close", "delete"])
+        run.assert_called_once_with(
+            [workspace_manager.HERDR, "workspace", "close", "current"]
+        )
+        delete.assert_called_once_with([folder], all_hosts)
+
+    def test_delete_project_folders_removes_full_folder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "project"
+            project.mkdir()
+            (project / "untracked.txt").write_text("delete me", encoding="utf-8")
+            host = workspace_manager.Host(
+                key="github",
+                label="GitHub",
+                hostname="github.com",
+                root=root,
+                public_repos_only=True,
+            )
+
+            workspace_manager.delete_project_folders([project], (host,))
+
+            self.assertFalse(project.exists())
+
+    def test_prefix_x_closes_focused_pane_when_workspace_has_multiple(self):
+        workspace = {"workspace_id": "current", "pane_count": 2}
+        with (
+            mock.patch.object(
+                workspace_manager,
+                "current_workspace_to_close",
+                return_value=workspace,
+            ),
+            mock.patch.object(
+                workspace_manager,
+                "pane_records",
+                return_value=[
+                    {
+                        "workspace_id": "current",
+                        "pane_id": "current-pane",
+                        "focused": True,
+                    },
+                    {
+                        "workspace_id": "current",
+                        "pane_id": "other-pane",
+                        "focused": False,
+                    },
+                ],
+            ),
+            mock.patch.object(workspace_manager, "close_workspace") as close,
+            mock.patch.object(workspace_manager, "run") as run,
+        ):
+            workspace_manager.close_current_pane_or_workspace()
+
+        close.assert_not_called()
+        run.assert_called_once_with(
+            [workspace_manager.HERDR, "pane", "close", "current-pane"]
+        )
+
+    def test_prefix_x_prompts_for_workspace_when_closing_last_pane(self):
+        workspace = {"workspace_id": "current", "pane_count": 1}
+        with (
+            mock.patch.object(
+                workspace_manager,
+                "current_workspace_to_close",
+                return_value=workspace,
+            ),
+            mock.patch.object(workspace_manager, "close_workspace") as close,
+            mock.patch.object(workspace_manager, "pane_records") as panes,
+        ):
+            workspace_manager.close_current_pane_or_workspace()
+
+        close.assert_called_once_with(workspace)
+        panes.assert_not_called()
+
+    def test_main_dispatches_close_action(self):
+        with (
+            mock.patch.object(workspace_manager, "require_commands"),
+            mock.patch.object(workspace_manager, "close_workspace") as close,
+            mock.patch.object(workspace_manager, "open_workspace") as open_,
+        ):
+            result = workspace_manager.main("close")
+
+        self.assertEqual(result, 0)
+        close.assert_called_once_with()
+        open_.assert_not_called()
 
     def test_add_and_remove_new_branch_worktree(self):
         with tempfile.TemporaryDirectory() as directory:

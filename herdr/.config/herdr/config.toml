@@ -72,7 +72,8 @@ auto_switch = false
 # open_notification_target = "prefix+o"
 # workspace_picker = "prefix+w"
 # goto = "prefix+g"
-# new_workspace = "prefix+shift+n"
+# Workspace Manager owns creation so it can include existing project folders.
+new_workspace = ""
 # new_worktree = "prefix+shift+g"
 # open_worktree = ""    # optional, unset by default
 # remove_worktree = ""  # optional, unset by default; opens confirmation
@@ -103,7 +104,8 @@ focus_pane_right = "ctrl+l"
 # last_pane = ""          # optional, unset by default; bind e.g. "prefix+tab" for global back-and-forth
 # split_vertical = "prefix+v"
 # split_horizontal = "prefix+minus"
-# close_pane = "prefix+x"
+# Workspace Manager owns last-pane closing so it can confirm folder deletion.
+close_pane = ""
 # zoom = "prefix+z"       # legacy alias: fullscreen
 # resize_mode = "prefix+r"
 # toggle_sidebar = "prefix+b"
@@ -134,7 +136,25 @@ focus_pane_right = "ctrl+l"
 key = "prefix+f"
 type = "plugin_action"
 command = "hlimas.project-picker.open"
-description = "create, open, or close a GitHub workspace"
+description = "create or open a workspace"
+
+[[keys.command]]
+key = "prefix+shift+n"
+type = "plugin_action"
+command = "hlimas.project-picker.open"
+description = "create or open a workspace"
+
+[[keys.command]]
+key = "prefix+shift+d"
+type = "plugin_action"
+command = "hlimas.project-picker.close"
+description = "close the current workspace and keep or delete its folders"
+
+[[keys.command]]
+key = "prefix+x"
+type = "plugin_action"
+command = "hlimas.project-picker.close-pane"
+description = "close the current pane or confirm closing its workspace"
 
 # Legacy indexed shortcut config is still parsed for compatibility.
 # Prefer switch_tab, switch_workspace, and focus_agent for new configs.
