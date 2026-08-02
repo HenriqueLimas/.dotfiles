@@ -11,6 +11,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from email.utils import getaddresses
@@ -46,6 +47,17 @@ class Host:
     hostname: str
     root: Path
     public_repos_only: bool
+
+
+@dataclass(frozen=True)
+class WorktreeRecord:
+    """A repository worktree that can be opened or copied into a new one."""
+
+    host: Host
+    path: Path
+    source: Path
+    repo: dict[str, Any]
+    branch: str
 
 
 def hosts() -> tuple[Host, Host]:
@@ -206,6 +218,95 @@ def choose_one_event(
         expect=expect,
     )
     return pressed, selected[0]
+
+
+def fzf_worktree_select_event(
+    rows: Sequence[tuple[str, str, str]],
+    *,
+    prompt: str,
+    header: str = "",
+) -> tuple[str, str]:
+    """Select a worktree without restarting fzf when its action changes."""
+
+    if not rows:
+        raise WorkspaceError("Nothing is available for this action.")
+
+    options = [
+        FZF,
+        "--delimiter=\t",
+        "--with-nth=1",
+        "--id-nth=3",
+        "--track",
+        "--no-sort",
+        f"--prompt={prompt}",
+        "--layout=reverse",
+        "--border=rounded",
+        "--height=100%",
+        "--no-hscroll",
+    ]
+    if header:
+        options.append(f"--header={header}")
+
+    with tempfile.TemporaryDirectory(prefix="herdr-picker-") as directory:
+        temporary = Path(directory)
+        state_path = temporary / "actions"
+        candidates_path = temporary / "candidates"
+        awk_path = temporary / "render.awk"
+        state_path.write_text("", encoding="utf-8")
+        candidates_path.write_text(
+            "".join(
+                f"{open_label}\t{new_label}\t{key}\n"
+                for open_label, new_label, key in rows
+            ),
+            encoding="utf-8",
+        )
+        awk_path.write_text(
+            """BEGIN {
+    while ((getline line < state) > 0) {
+        split(line, fields, "\\t")
+        actions[fields[1]] = fields[2]
+    }
+    close(state)
+}
+{
+    label = actions[$3] == "new" ? $2 : $1
+    print label, $2, $3
+}
+""",
+            encoding="utf-8",
+        )
+        quoted_state = shlex.quote(str(state_path))
+        quoted_candidates = shlex.quote(str(candidates_path))
+        quoted_awk = shlex.quote(str(awk_path))
+        render = (
+            "awk -F '\\t' -v OFS='\\t' "
+            f"-v state={quoted_state} -f {quoted_awk} {quoted_candidates}"
+        )
+        bindings = []
+        for key, action in (("left", "open"), ("right", "new")):
+            update = (
+                f"printf '%s\\t{action}\\n' {{3}} >> {quoted_state}"
+            )
+            bindings.append(
+                f"{key}:execute-silent({update})+reload-sync({render})"
+            )
+        options.append(f"--bind={','.join(bindings)}")
+
+        selected = subprocess.run(
+            options,
+            input=candidates_path.read_text(encoding="utf-8"),
+            text=True,
+            stdout=subprocess.PIPE,
+        )
+        if selected.returncode != 0 or not selected.stdout:
+            raise Cancelled
+        selected_key = selected.stdout.splitlines()[-1].rsplit("\t", 1)[-1]
+        actions = {}
+        for line in state_path.read_text(encoding="utf-8").splitlines():
+            key, separator, action = line.partition("\t")
+            if separator:
+                actions[key] = action
+        return selected_key, actions.get(selected_key, "open")
 
 
 def prompt_text(prompt: str, *, default: str = "") -> str:
@@ -771,6 +872,110 @@ def choose_repositories(all_hosts: Sequence[Host]) -> list[dict[str, Any]]:
         groups = group_repositories(repos, history)
 
 
+def choose_repository(all_hosts: Sequence[Host]) -> dict[str, Any]:
+    """Choose one repository without introducing a multi-repository change."""
+
+    repos = load_repository_catalog(all_hosts)
+    history = load_selection_history()
+    groups = group_repositories(repos, history)
+
+    while True:
+        owner_rows: list[tuple[str, str]] = [
+            ("↻  Refresh owners and repositories", "action:refresh")
+        ]
+        groups_by_key: dict[
+            str, tuple[tuple[str, str], list[dict[str, Any]]]
+        ] = {}
+        for index, group in enumerate(groups):
+            (_, owner), owner_repos = group
+            key = f"owner:{index}"
+            groups_by_key[key] = group
+            owner_rows.append(
+                (
+                    f"{owner_repos[0]['host_label']:<9}  {owner}",
+                    key,
+                )
+            )
+
+        owner_choice = choose_one(
+            owner_rows,
+            prompt="Owner> ",
+            header="Choose an owner; the next popup lists its repositories",
+        )
+        if owner_choice == "action:refresh":
+            repos = load_repository_catalog(all_hosts, refresh=True)
+            groups = group_repositories(repos, history)
+            continue
+
+        (host_key, owner), owner_repos = groups_by_key[owner_choice]
+        mark_recent(history, f"organization:{host_key}/{owner.lower()}")
+        while True:
+            repo_rows: list[tuple[str, str]] = [
+                ("←  Back to owners", "action:back"),
+                (f"↻  Refresh repositories in {owner}", "action:refresh"),
+            ]
+            repos_by_key: dict[str, dict[str, Any]] = {}
+            ordered_repos = sorted(
+                owner_repos,
+                key=lambda repo: recent_sort_key(
+                    history,
+                    f"repository:{repository_selection_key(repo)}",
+                    str(repo["full_name"]),
+                ),
+            )
+            for index, repo in enumerate(ordered_repos):
+                key = f"repo:{index}"
+                repos_by_key[key] = repo
+                name = str(repo["full_name"]).partition("/")[2]
+                description = (
+                    f"  —  {repo['description']}"
+                    if repo.get("description")
+                    else ""
+                )
+                repo_rows.append((f"{name}{description}", key))
+
+            try:
+                pressed, repo_choice = choose_one_event(
+                    repo_rows,
+                    prompt=f"{owner}> ",
+                    header=(
+                        "Enter selects a repository; left or Escape returns"
+                    ),
+                    expect=("left",),
+                )
+            except Cancelled:
+                break
+            if pressed == "left":
+                break
+            if repo_choice == "action:back":
+                break
+            if repo_choice == "action:refresh":
+                refreshed = load_repository_catalog(
+                    all_hosts, refresh=True
+                )
+                repos = refreshed
+                groups = group_repositories(repos, history)
+                refreshed_group = next(
+                    (
+                        group
+                        for group in groups
+                        if group[0] == (host_key, owner)
+                    ),
+                    None,
+                )
+                if refreshed_group is None:
+                    break
+                owner_repos = refreshed_group[1]
+                continue
+            repo = repos_by_key[repo_choice]
+            mark_recent(
+                history,
+                f"repository:{repository_selection_key(repo)}",
+            )
+            return repo
+        groups = group_repositories(repos, history)
+
+
 def canonical_remote(remote: str) -> tuple[str, str] | None:
     remote = remote.strip()
     if not remote:
@@ -794,6 +999,279 @@ def canonical_remote(remote: str) -> tuple[str, str] | None:
 
 def git_output(source: Path, *args: str, check: bool = True) -> str:
     return run([GIT, "-C", str(source), *args], check=check).stdout.strip()
+
+
+def parse_worktree_list(output: str) -> list[dict[str, str | bool]]:
+    """Parse the stable porcelain form of `git worktree list`."""
+
+    entries: list[dict[str, str | bool]] = []
+    current: dict[str, str | bool] | None = None
+
+    def finish() -> None:
+        if current and current.get("path"):
+            entries.append(current)
+
+    for line in output.splitlines():
+        if not line:
+            finish()
+            current = None
+            continue
+        if line.startswith("worktree "):
+            finish()
+            current = {
+                "path": line.removeprefix("worktree "),
+                "branch": "",
+                "bare": False,
+            }
+            continue
+        if current is None:
+            continue
+        if line == "bare":
+            current["bare"] = True
+        elif line.startswith("branch refs/heads/"):
+            current["branch"] = line.removeprefix("branch refs/heads/")
+        elif line == "detached":
+            current["branch"] = ""
+
+    finish()
+    return entries
+
+
+def default_branch_for_source(source: Path, fallback: str = "main") -> str:
+    symbolic = git_output(
+        source,
+        "symbolic-ref",
+        "--quiet",
+        "--short",
+        "refs/remotes/origin/HEAD",
+        check=False,
+    )
+    if symbolic.startswith("origin/"):
+        return symbolic.removeprefix("origin/")
+    return fallback
+
+
+def remote_default_branch(source: Path, fallback: str = "main") -> str:
+    local = default_branch_for_source(source, "")
+    if local:
+        return local
+    output = git_output(
+        source,
+        "ls-remote",
+        "--symref",
+        "origin",
+        "HEAD",
+        check=False,
+    )
+    match = re.search(r"ref: refs/heads/([^\s]+)\s+HEAD", output)
+    return match.group(1) if match else (fallback or "main")
+
+
+def repository_sources(host: Host) -> list[Path]:
+    """Return normal repositories and manager-owned bare repositories."""
+
+    if not host.root.is_dir():
+        return []
+
+    direct: list[Path] = []
+    for candidate in host.root.iterdir():
+        if candidate.name == ".herdr" or not candidate.is_dir():
+            continue
+        if (candidate / ".git").exists():
+            direct.append(candidate)
+            continue
+        nested = sorted(
+            (
+                path
+                for path in candidate.iterdir()
+                if path.is_dir() and (path / ".git").exists()
+            ),
+            key=lambda path: (
+                0 if path.name == "main" else 1,
+                0 if (path / ".git").is_dir() else 1,
+                path.name.casefold(),
+            ),
+        )
+        if nested:
+            direct.append(nested[0])
+    direct.sort(
+        key=lambda path: (
+            0 if (path / ".git").is_dir() else 1,
+            path.parent.name.casefold(),
+            path.name.casefold(),
+        )
+    )
+
+    caches = host.root / ".herdr" / "repositories"
+    bare = (
+        sorted(caches.glob("*.git"), key=lambda path: path.name.casefold())
+        if caches.is_dir()
+        else []
+    )
+    return direct + [path for path in bare if (path / "HEAD").exists()]
+
+
+def worktrees_for_source(
+    storage_host: Host,
+    source: Path,
+    all_hosts: Sequence[Host],
+    host_by_hostname: dict[str, Host],
+) -> list[WorktreeRecord]:
+    source_path = source.resolve()
+    entries = parse_worktree_list(
+        git_output(
+            source,
+            "worktree",
+            "list",
+            "--porcelain",
+            check=False,
+        )
+    )
+    if (source / ".git").exists():
+        primary = next(
+            (
+                entry
+                for entry in entries
+                if not entry.get("bare") and entry.get("path")
+            ),
+            None,
+        )
+        if primary:
+            source_path = Path(
+                str(primary["path"])
+            ).expanduser().resolve()
+    remote = git_output(
+        source_path,
+        "remote",
+        "get-url",
+        "origin",
+        check=False,
+    )
+    canonical = canonical_remote(remote)
+    if canonical:
+        hostname, full_name = canonical
+        repo_host = host_by_hostname.get(hostname, storage_host)
+    else:
+        hostname = storage_host.hostname
+        full_name = source.name
+        repo_host = storage_host
+
+    records: list[WorktreeRecord] = []
+    for entry in entries:
+        if entry.get("bare"):
+            continue
+        path = Path(str(entry["path"])).expanduser().resolve()
+        if not path.is_dir():
+            continue
+        worktree_host = next(
+            (
+                host
+                for host in all_hosts
+                if path_contains(host.root, path)
+            ),
+            None,
+        )
+        if worktree_host is None:
+            continue
+        repo = {
+            "host_key": repo_host.key,
+            "host_label": repo_host.label,
+            "hostname": hostname,
+            "full_name": full_name,
+            "description": "",
+            "default_branch": "",
+        }
+        records.append(
+            WorktreeRecord(
+                host=worktree_host,
+                path=path,
+                source=source_path,
+                repo=repo,
+                branch=str(entry.get("branch") or ""),
+            )
+        )
+    return records
+
+
+def local_worktrees(all_hosts: Sequence[Host]) -> list[WorktreeRecord]:
+    """Discover every usable worktree beneath the configured project roots."""
+
+    sources = [
+        (host, source)
+        for host in all_hosts
+        for source in repository_sources(host)
+    ]
+    if not sources:
+        return []
+    host_by_hostname = {
+        host.hostname.casefold(): host for host in all_hosts
+    }
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(8, len(sources))
+    ) as executor:
+        futures = [
+            executor.submit(
+                worktrees_for_source,
+                storage_host,
+                source,
+                all_hosts,
+                host_by_hostname,
+            )
+            for storage_host, source in sources
+        ]
+        records: dict[str, WorktreeRecord] = {}
+        for future in futures:
+            for record in future.result():
+                try:
+                    key = str(record.path.resolve())
+                except OSError:
+                    key = str(record.path)
+                records.setdefault(key, record)
+    return list(records.values())
+
+
+def repository_workspace_name(repo: dict[str, Any]) -> str:
+    return str(repo["full_name"]).rsplit("/", 1)[-1]
+
+
+def worktree_display_name(record: WorktreeRecord) -> str:
+    repository = repository_workspace_name(record.repo)
+    if record.path == record.source:
+        return repository
+    worktree_name = record.path.name
+    workspace_root = (
+        record.host.root / repository_workspace_name(record.repo)
+    ).resolve()
+    try:
+        relative = record.path.resolve().relative_to(workspace_root)
+    except (OSError, ValueError):
+        relative = Path()
+    if relative.parts:
+        worktree_name = relative.as_posix()
+    elif worktree_name.casefold() == repo_dir_name(
+        str(record.repo["full_name"])
+    ).casefold():
+        worktree_name = record.path.parent.name
+    return f"{repository}  {worktree_name}"
+
+
+def worktree_row_label(record: WorktreeRecord, action: str = "open") -> str:
+    actions = "[open] new" if action == "open" else "open [new]"
+    return f"{record.host.label:<9}  {worktree_display_name(record)}   {actions}"
+
+
+def worktree_history_key(record: WorktreeRecord) -> str:
+    return f"project:{record.path.resolve()}"
+
+
+def worktree_sort_key(
+    history: dict[str, float], record: WorktreeRecord
+) -> tuple[float, str]:
+    return recent_sort_key(
+        history,
+        worktree_history_key(record),
+        f"{record.host.label}/{record.repo['full_name']}/{record.path}",
+    )
 
 
 def find_existing_source(
@@ -1045,6 +1523,76 @@ def load_manifests() -> list[dict[str, Any]]:
     return result
 
 
+def nested_worktree_exclusion(
+    source: Path, destination: Path
+) -> tuple[Path, str] | None:
+    try:
+        relative = destination.resolve().relative_to(source.resolve())
+    except (OSError, ValueError):
+        return None
+    exclude_value = f"/{relative.as_posix().rstrip('/')}/"
+    git_path = git_output(
+        source,
+        "rev-parse",
+        "--git-path",
+        "info/exclude",
+    )
+    exclude_path = Path(git_path)
+    if not exclude_path.is_absolute():
+        exclude_path = source / exclude_path
+    return exclude_path, exclude_value
+
+
+def add_nested_worktree_exclusion(
+    source: Path, destination: Path
+) -> None:
+    exclusion = nested_worktree_exclusion(source, destination)
+    if exclusion is None:
+        return
+    exclude_path, value = exclusion
+    marker = f"# herdr-worktree {value}"
+    existing = (
+        exclude_path.read_text(encoding="utf-8")
+        if exclude_path.is_file()
+        else ""
+    )
+    if value in existing.splitlines():
+        return
+    exclude_path.parent.mkdir(parents=True, exist_ok=True)
+    prefix = "" if not existing or existing.endswith("\n") else "\n"
+    with exclude_path.open("a", encoding="utf-8") as exclude_file:
+        exclude_file.write(f"{prefix}{marker}\n{value}\n")
+
+
+def remove_nested_worktree_exclusion(
+    source: Path, destination: Path
+) -> None:
+    exclusion = nested_worktree_exclusion(source, destination)
+    if exclusion is None:
+        return
+    exclude_path, value = exclusion
+    if not exclude_path.is_file():
+        return
+    marker = f"# herdr-worktree {value}"
+    lines = exclude_path.read_text(encoding="utf-8").splitlines()
+    cleaned: list[str] = []
+    index = 0
+    while index < len(lines):
+        if (
+            lines[index] == marker
+            and index + 1 < len(lines)
+            and lines[index + 1] == value
+        ):
+            index += 2
+            continue
+        cleaned.append(lines[index])
+        index += 1
+    exclude_path.write_text(
+        "".join(f"{line}\n" for line in cleaned),
+        encoding="utf-8",
+    )
+
+
 def add_worktree(
     source: Path,
     destination: Path,
@@ -1058,6 +1606,7 @@ def add_worktree(
         args.extend(("-b", str(selection["branch"])))
     args.extend((str(destination), str(selection["start_point"])))
     run(args)
+    add_nested_worktree_exclusion(source, destination)
 
 
 def configure_github_worktree(
@@ -1085,6 +1634,7 @@ def remove_worktree(
         args.append("--force")
     args.append(str(destination))
     run(args)
+    remove_nested_worktree_exclusion(source, destination)
     for parent in (destination.parent, destination.parent.parent):
         try:
             parent.rmdir()
@@ -1092,106 +1642,179 @@ def remove_worktree(
             break
 
 
-def create_workspace(all_hosts: Sequence[Host]) -> None:
-    require_commands(GH, GIT)
-    selected_repos = choose_repositories(all_hosts)
-    github_signing_key = ""
-    if any(repo["host_key"] == "github" for repo in selected_repos):
-        require_commands(GPG)
-        github_signing_key = choose_gpg_signing_key(GITHUB_AUTHOR_EMAIL)
-    host_by_key = {host.key: host for host in all_hosts}
-    prepared: list[dict[str, Any]] = []
-    for repo in selected_repos:
-        host = host_by_key[repo["host_key"]]
-        source = prepare_source(host, repo, all_hosts)
-        branch = choose_branch(source, repo)
-        workspace_root = next(
-            (
-                candidate.root
-                for candidate in all_hosts
-                if path_contains(candidate.root, source)
-            ),
-            host.root,
-        )
-        prepared.append(
-            {
-                **repo,
-                **branch,
-                "source": str(source),
-                "workspace_root": str(workspace_root),
-            }
-        )
-
-    name = prompt_text(
-        "Workspace name",
-        default=suggested_workspace_name(prepared),
+def host_for_path(
+    all_hosts: Sequence[Host], path: Path, fallback: Host
+) -> Host:
+    return next(
+        (
+            host
+            for host in all_hosts
+            if path_contains(host.root, path)
+        ),
+        fallback,
     )
-    slug = slugify(name)
-    if manifest_path(slug).exists():
-        raise WorkspaceError(f"A managed workspace named {name!r} already exists.")
 
-    seen_destinations: set[Path] = set()
-    for repo in prepared:
-        destination = (
-            Path(repo["workspace_root"])
-            / ".herdr"
-            / "workspaces"
-            / slug
-            / repo_dir_name(repo["full_name"])
-        )
-        if destination in seen_destinations or destination.exists():
-            raise WorkspaceError(
-                f"Workspace repository path already exists: {destination}"
-            )
-        seen_destinations.add(destination)
-        repo["path"] = str(destination)
 
-    created: list[dict[str, Any]] = []
+def workspace_name_for_path(
+    host: Host, path: Path, repo: dict[str, Any]
+) -> str:
     try:
-        for repo in prepared:
-            add_worktree(
-                Path(repo["source"]),
-                Path(repo["path"]),
-                repo,
-            )
-            if repo["host_key"] == "github":
-                configure_github_worktree(
-                    Path(repo["source"]),
-                    Path(repo["path"]),
-                    github_signing_key,
-                )
-            created.append(repo)
-    except (WorkspaceError, KeyboardInterrupt):
-        for repo in reversed(created):
+        relative = path.resolve().relative_to(host.root.resolve())
+    except (OSError, ValueError):
+        relative = Path()
+    if relative.parts and relative.parts[0] != ".herdr":
+        return relative.parts[0]
+    return repository_workspace_name(repo)
+
+
+def default_branch_selection(
+    source: Path, repo: dict[str, Any]
+) -> dict[str, str | bool]:
+    """Fetch and select the repository's default branch, never another base."""
+
+    default = str(repo.get("default_branch") or "")
+    if not default:
+        default = remote_default_branch(source)
+    fetch_remote_branch(source, default)
+    return {
+        "branch": "",
+        "default_branch": default,
+        "start_point": f"origin/{default}",
+        "create": True,
+    }
+
+
+def worktree_manifest_slug(repo: dict[str, Any], slug: str) -> str:
+    return f"{repo_dir_name(str(repo['full_name']))}--{slug}"
+
+
+def create_new_worktree(
+    *,
+    repo: dict[str, Any],
+    source: Path,
+    storage_host: Host,
+    branch_name: str | None = None,
+    workspace_name: str | None = None,
+) -> dict[str, Any]:
+    """Create one branch/worktree and open it as a one-repository workspace."""
+
+    repo = dict(repo)
+    branch = (branch_name or prompt_text("Branch name")).strip()
+    if not branch:
+        raise Cancelled
+    validate_branch_name(branch)
+    selection = default_branch_selection(source, repo)
+    if (
+        branch in local_branches(source)
+        or branch in occupied_branches(source)
+        or remote_branch_exists(source, branch)
+    ):
+        raise WorkspaceError(
+            f"A branch or worktree named {branch!r} already exists."
+        )
+
+    storage_host.root.mkdir(parents=True, exist_ok=True)
+    workspace_name = workspace_name or repository_workspace_name(repo)
+    destination = storage_host.root / workspace_name / branch
+    if not path_contains(storage_host.root, destination):
+        raise WorkspaceError(
+            f"Worktree path escapes the configured root: {destination}"
+        )
+    if destination.exists():
+        raise WorkspaceError(
+            f"Worktree folder already exists: {destination}"
+        )
+
+    selection["branch"] = branch
+    manifest_slug = worktree_manifest_slug(
+        repo, repo_dir_name(branch)
+    )
+    if manifest_path(manifest_slug).exists():
+        raise WorkspaceError(
+            f"A managed worktree for branch {branch!r} already exists."
+        )
+    workspace_label = f"{workspace_name}/{branch}"
+
+    signing_key = ""
+    if repo.get("host_key") == "github":
+        require_commands(GPG)
+        signing_key = choose_gpg_signing_key(GITHUB_AUTHOR_EMAIL)
+
+    created = False
+    try:
+        add_worktree(source, destination, selection)
+        created = True
+        if repo.get("host_key") == "github":
+            configure_github_worktree(source, destination, signing_key)
+        manifest = {
+            "version": 2,
+            "name": workspace_label,
+            "slug": manifest_slug,
+            "repos": [
+                {
+                    "host_key": repo["host_key"],
+                    "hostname": repo["hostname"],
+                    "full_name": repo["full_name"],
+                    "default_branch": str(
+                        selection.get("default_branch") or repo.get(
+                            "default_branch"
+                        ) or "main"
+                    ),
+                    "branch": branch,
+                    "source": str(source),
+                    "path": str(destination),
+                }
+            ],
+        }
+        save_manifest(manifest)
+    except (KeyboardInterrupt, OSError, WorkspaceError) as error:
+        if created:
             try:
-                remove_worktree(
-                    Path(repo["source"]), Path(repo["path"])
-                )
+                remove_worktree(source, destination)
             except WorkspaceError:
                 pass
+        if isinstance(error, OSError):
+            raise WorkspaceError(
+                f"Could not save worktree metadata for {destination}: {error}"
+            ) from error
         raise
 
-    manifest = {
-        "version": 1,
-        "name": name,
-        "slug": slug,
-        "repos": [
-            {
-                "host_key": repo["host_key"],
-                "hostname": repo["hostname"],
-                "full_name": repo["full_name"],
-                "default_branch": repo["default_branch"],
-                "branch": repo["branch"],
-                "source": repo["source"],
-                "path": repo["path"],
-            }
-            for repo in prepared
-        ],
-    }
-    save_manifest(manifest)
     history = load_selection_history()
     mark_recent(history, f"workspace:{manifest['slug']}")
-    open_managed_workspace(manifest)
+    mark_recent(history, f"project:{destination.resolve()}")
+    mark_recent(history, f"repository:{repository_selection_key(repo)}")
+    open_managed_worktree(manifest)
+    return manifest
+
+
+def create_worktree_from_existing(
+    record: WorktreeRecord, all_hosts: Sequence[Host]
+) -> dict[str, Any]:
+    storage_host = host_for_path(all_hosts, record.path, record.host)
+    return create_new_worktree(
+        repo=record.repo,
+        source=record.source,
+        storage_host=storage_host,
+        workspace_name=workspace_name_for_path(
+            storage_host, record.path, record.repo
+        ),
+    )
+
+
+def create_workspace(all_hosts: Sequence[Host]) -> None:
+    require_commands(GH, GIT)
+    repo = choose_repository(all_hosts)
+    selected_host = next(host for host in all_hosts if host.key == repo["host_key"])
+    source = prepare_source(selected_host, repo, all_hosts)
+    storage_host = host_for_path(all_hosts, source, selected_host)
+    create_new_worktree(
+        repo=repo,
+        source=source,
+        storage_host=storage_host,
+        workspace_name=workspace_name_for_path(
+            storage_host, source, repo
+        ),
+    )
 
 
 def json_command(args: Sequence[str]) -> dict[str, Any]:
@@ -1348,6 +1971,38 @@ def create_herdr_workspace(
         start_pi(tab_pane_id, path)
 
 
+def open_managed_worktree(manifest: dict[str, Any]) -> None:
+    repo = manifest["repos"][0]
+    source = Path(repo["source"])
+    path = Path(repo["path"])
+    if not path.is_dir():
+        raise WorkspaceError(f"Worktree folder is missing: {path}")
+    existing = active_workspace_for([path])
+    if existing:
+        run([HERDR, "workspace", "focus", existing])
+        return
+    worktree_label = str(repo.get("branch") or path.name)
+    opened = json_command(
+        [
+            HERDR,
+            "worktree",
+            "open",
+            "--cwd",
+            str(source),
+            "--path",
+            str(path),
+            "--label",
+            worktree_label,
+            "--focus",
+        ]
+    )
+    pane_id = first_nested(opened, "pane_id")
+    if not pane_id:
+        raise WorkspaceError("Herdr did not return a worktree root pane.")
+    start_dependency_install(path)
+    start_pi(pane_id, path)
+
+
 def open_managed_workspace(manifest: dict[str, Any]) -> None:
     directories = [
         (repo["full_name"], Path(repo["path"]))
@@ -1384,95 +2039,101 @@ def local_projects(all_hosts: Sequence[Host]) -> list[tuple[Host, Path]]:
         if not host.root.is_dir():
             continue
         for path in host.root.iterdir():
-            if path.name == ".herdr" or not path.is_dir():
+            if (
+                path.name == ".herdr"
+                or not path.is_dir()
+                or not (path / ".git").exists()
+            ):
                 continue
             projects.append((host, path))
     return sorted(projects, key=lambda item: (item[0].label, item[1].name.lower()))
 
 
-def open_workspace(all_hosts: Sequence[Host]) -> None:
-    history = load_selection_history()
-    manifests = sorted(
-        load_manifests(),
-        key=lambda manifest: recent_sort_key(
-            history,
-            f"workspace:{manifest['slug']}",
-            str(manifest["name"]),
-        ),
-    )
-    rows: list[tuple[str, str]] = [
-        ("+  Add a new multi-repository workspace", "action:create"),
-        ("-  Delete or close a workspace", "action:close"),
-    ]
-    choices: dict[str, tuple[str, Any]] = {
-        "action:create": ("create", None),
-        "action:close": ("close", None),
-    }
-    for index, manifest in enumerate(manifests):
-        valid = sum(
-            1
-            for repo in manifest["repos"]
-            if repo.get("path") and Path(repo["path"]).is_dir()
-        )
-        key = f"managed:{index}"
-        active = (
-            "  [open]"
-            if active_workspace_for(
-                [
-                    Path(repo["path"])
-                    for repo in manifest["repos"]
-                    if repo.get("path")
-                ]
-            )
-            else ""
-        )
-        rows.append(
-            (
-                f"Workspace  {manifest['name']}  ({valid} repos){active}",
-                key,
-            )
-        )
-        choices[key] = ("managed", manifest)
-    projects = sorted(
-        local_projects(all_hosts),
-        key=lambda item: recent_sort_key(
-            history,
-            f"project:{item[1].resolve()}",
-            f"{item[0].label}/{item[1].name}",
-        ),
-    )
-    for index, (host, path) in enumerate(projects):
-        key = f"project:{index}"
-        active = "  [open]" if active_workspace_for([path]) else ""
-        rows.append((f"{host.label:<9}  {path.name}{active}", key))
-        choices[key] = ("project", path)
-
-    choice = choose_one(
-        rows,
-        prompt="Workspace> ",
-        header="Actions, managed workspaces, and existing repositories",
-    )
-    kind, value = choices[choice]
-    if kind == "create":
-        create_workspace(all_hosts)
-        return
-    if kind == "close":
-        close_workspace()
-        return
-    if kind == "managed":
-        mark_recent(history, f"workspace:{value['slug']}")
-        open_managed_workspace(value)
-        return
-    path = Path(value)
-    mark_recent(history, f"project:{path.resolve()}")
-    existing = active_workspace_for([path])
+def open_existing_worktree(record: WorktreeRecord) -> None:
+    if not record.path.is_dir():
+        raise WorkspaceError(f"Worktree folder is missing: {record.path}")
+    existing = active_workspace_for([record.path])
     if existing:
         run([HERDR, "workspace", "focus", existing])
         return
     create_herdr_workspace(
-        name=path.name,
-        directories=[(path.name, path)],
+        name=worktree_display_name(record),
+        directories=[(str(record.repo["full_name"]), record.path)],
     )
+
+
+def choose_worktree_action(
+    records: Sequence[WorktreeRecord],
+) -> tuple[str, str]:
+    """Return a picker key and either `open` or `new`."""
+
+    rows: list[tuple[str, str, str]] = [
+        (
+            "+  Create a new worktree from GitHub",
+            "+  Create a new worktree from GitHub",
+            "action:create",
+        ),
+        (
+            "-  Close the current workspace",
+            "-  Close the current workspace",
+            "action:close",
+        ),
+    ]
+    choices: dict[str, WorktreeRecord] = {}
+    for index, record in enumerate(records):
+        key = f"worktree:{index}"
+        choices[key] = record
+        rows.append(
+            (
+                worktree_row_label(record, "open"),
+                worktree_row_label(record, "new"),
+                key,
+            )
+        )
+
+    choice, action = fzf_worktree_select_event(
+        rows,
+        prompt="Workspace> ",
+        header=(
+            "Enter opens the selected action; left/right selects "
+            "[open] or [new]"
+        ),
+    )
+    if choice in {"action:create", "action:close"}:
+        return choice, "open"
+    if choice not in choices:
+        raise WorkspaceError("The selected worktree is no longer available.")
+    return choice, action
+
+
+def open_workspace(all_hosts: Sequence[Host]) -> None:
+    history = load_selection_history()
+    records = sorted(
+        local_worktrees(all_hosts),
+        key=lambda record: worktree_sort_key(history, record),
+    )
+    choices = {
+        f"worktree:{index}": record
+        for index, record in enumerate(records)
+    }
+    choice, action = choose_worktree_action(records)
+    if choice == "action:create":
+        create_workspace(all_hosts)
+        return
+    if choice == "action:close":
+        close_workspace()
+        return
+
+    record = choices[choice]
+    mark_recent(history, worktree_history_key(record))
+    mark_recent(
+        history,
+        f"repository:{repository_selection_key(record.repo)}",
+    )
+    if action == "new":
+        create_worktree_from_existing(record, all_hosts)
+    else:
+        open_existing_worktree(record)
 
 
 def workspace_records() -> list[dict[str, Any]]:
@@ -1764,7 +2425,7 @@ def main(
             require_commands(HERDR)
             perform_background_deletion(action, action_arguments)
             return 0
-        require_commands(HERDR, FZF)
+        require_commands(HERDR, FZF, GIT)
         if action == "open":
             open_workspace(hosts())
         elif action == "close":

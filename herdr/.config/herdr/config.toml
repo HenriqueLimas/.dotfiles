@@ -72,7 +72,7 @@ auto_switch = false
 # open_notification_target = "prefix+o"
 # workspace_picker = "prefix+w"
 # goto = "prefix+g"
-# Workspace Manager owns creation so it can include existing project folders.
+# Workspace Manager owns creation so it can create single-repository worktrees.
 new_workspace = ""
 # new_worktree = "prefix+shift+g"
 # open_worktree = ""    # optional, unset by default
@@ -136,13 +136,13 @@ close_pane = ""
 key = "prefix+f"
 type = "plugin_action"
 command = "hlimas.project-picker.open"
-description = "create or open a workspace"
+description = "create or open a repository worktree"
 
 [[keys.command]]
 key = "prefix+shift+n"
 type = "plugin_action"
 command = "hlimas.project-picker.open"
-description = "create or open a workspace"
+description = "create or open a repository worktree"
 
 [[keys.command]]
 key = "prefix+shift+d"

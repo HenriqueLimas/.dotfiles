@@ -1,14 +1,14 @@
 id = "hlimas.project-picker"
 name = "Workspace Manager"
-version = "0.5.0"
+version = "0.7.0"
 min_herdr_version = "0.7.5"
-description = "Create, open, and close multi-repository GitHub workspaces"
+description = "Create, open, and close single-repository Git workspaces"
 platforms = ["macos", "linux"]
 
 [[actions]]
 id = "open"
 title = "Manage workspaces"
-description = "Create or open a workspace"
+description = "Create or open a repository worktree"
 command = ["bash", "open-picker.sh"]
 
 [[actions]]
@@ -26,7 +26,7 @@ command = ["bash", "open-picker.sh", "pane-closer"]
 [[panes]]
 id = "picker"
 title = "Workspace Manager"
-description = "Create or open a workspace"
+description = "Create or open a repository worktree"
 placement = "popup"
 width = "80%"
 height = "80%"

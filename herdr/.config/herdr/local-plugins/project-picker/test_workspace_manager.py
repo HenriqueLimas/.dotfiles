@@ -78,6 +78,240 @@ class WorkspaceManagerTest(unittest.TestCase):
             start_new_session=True,
         )
 
+    def test_parse_worktree_list_reads_bare_and_linked_entries(self):
+        entries = workspace_manager.parse_worktree_list(
+            "\n".join(
+                [
+                    "worktree /repo.git",
+                    "HEAD abc",
+                    "bare",
+                    "",
+                    "worktree /workspace/demo",
+                    "HEAD def",
+                    "branch refs/heads/demo",
+                    "",
+                    "worktree /workspace/detached",
+                    "HEAD ghi",
+                    "detached",
+                ]
+            )
+        )
+
+        self.assertEqual(entries[0]["bare"], True)
+        self.assertEqual(entries[1]["branch"], "demo")
+        self.assertEqual(entries[2]["branch"], "")
+
+    def test_repository_sources_discovers_nested_workspace_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "marko-bindings"
+            main = workspace / "main"
+            feature = workspace / "feature"
+            (main / ".git").mkdir(parents=True)
+            feature.mkdir()
+            (feature / ".git").write_text(
+                "gitdir: ../main/.git/worktrees/feature\n",
+                encoding="utf-8",
+            )
+            host = workspace_manager.Host(
+                key="github",
+                label="GitHub",
+                hostname="github.com",
+                root=root,
+                public_repos_only=True,
+            )
+
+            sources = workspace_manager.repository_sources(host)
+
+        self.assertEqual(sources, [main])
+
+    def test_worktree_picker_defaults_to_open_and_toggles_with_right(self):
+        host = workspace_manager.Host(
+            key="ebay",
+            label="eBay",
+            hostname="github.corp.ebay.com",
+            root=Path("/projects/ebay"),
+            public_repos_only=False,
+        )
+        record = workspace_manager.WorktreeRecord(
+            host=host,
+            path=Path("/projects/ebay/evo-web"),
+            source=Path("/projects/ebay/evo-web"),
+            repo={
+                "host_key": "ebay",
+                "hostname": host.hostname,
+                "full_name": "eBay/evo-web",
+                "default_branch": "main",
+            },
+            branch="main",
+        )
+        with mock.patch.object(
+            workspace_manager,
+            "fzf_worktree_select_event",
+            return_value=("worktree:0", "new"),
+        ) as choose:
+            choice, action = workspace_manager.choose_worktree_action(
+                [record]
+            )
+
+        self.assertEqual((choice, action), ("worktree:0", "new"))
+        rows = choose.call_args.args[0]
+        self.assertIn("[open] new", rows[2][0])
+        self.assertIn("open [new]", rows[2][1])
+
+    def test_worktree_picker_uses_native_arrow_bindings(self):
+        completed = subprocess.CompletedProcess(
+            args=["fzf"],
+            returncode=0,
+            stdout="open\tnew\tworktree:0\n",
+            stderr="",
+        )
+        with mock.patch.object(
+            workspace_manager.subprocess,
+            "run",
+            return_value=completed,
+        ) as run:
+            selected = workspace_manager.fzf_worktree_select_event(
+                [("open", "new", "worktree:0")],
+                prompt="Workspace> ",
+            )
+
+        self.assertEqual(selected, ("worktree:0", "open"))
+        options = run.call_args.args[0]
+        self.assertIn("--track", options)
+        self.assertIn("--id-nth=3", options)
+        binding = next(option for option in options if option.startswith("--bind="))
+        self.assertIn("left:execute-silent", binding)
+        self.assertIn("right:execute-silent", binding)
+        self.assertIn("reload-sync", binding)
+        self.assertNotIn("--expect=", " ".join(options))
+
+    def test_default_branch_selection_never_prompts_for_another_branch(self):
+        repo = {
+            "hostname": "github.com",
+            "full_name": "team/repo",
+            "default_branch": "develop",
+        }
+        with mock.patch.object(
+            workspace_manager, "fetch_remote_branch"
+        ) as fetch:
+            selection = workspace_manager.default_branch_selection(
+                Path("/repo"), repo
+            )
+
+        fetch.assert_called_once_with(Path("/repo"), "develop")
+        self.assertEqual(selection["start_point"], "origin/develop")
+        self.assertEqual(selection["default_branch"], "develop")
+
+    def test_new_worktree_uses_workspace_and_branch_path(self):
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        project_root = Path(root.name) / "ebay"
+        host = workspace_manager.Host(
+            key="ebay",
+            label="eBay",
+            hostname="github.corp.ebay.com",
+            root=project_root,
+            public_repos_only=False,
+        )
+        repo = {
+            "host_key": "ebay",
+            "hostname": host.hostname,
+            "full_name": "eBay/evo-web",
+            "default_branch": "main",
+        }
+        source = project_root / "evo-web"
+        with (
+            tempfile.TemporaryDirectory() as state,
+            mock.patch.dict(
+                workspace_manager.os.environ,
+                {"HERDR_WORKSPACE_STATE_DIR": state},
+            ),
+            mock.patch.object(
+                workspace_manager,
+                "default_branch_selection",
+                return_value={
+                    "branch": "",
+                    "default_branch": "main",
+                    "start_point": "origin/main",
+                    "create": True,
+                },
+            ),
+            mock.patch.object(workspace_manager, "validate_branch_name"),
+            mock.patch.object(
+                workspace_manager, "local_branches", return_value=set()
+            ),
+            mock.patch.object(
+                workspace_manager, "occupied_branches", return_value=set()
+            ),
+            mock.patch.object(
+                workspace_manager, "remote_branch_exists", return_value=False
+            ),
+            mock.patch.object(workspace_manager, "add_worktree") as add,
+            mock.patch.object(
+                workspace_manager, "open_managed_worktree"
+            ) as open_worktree,
+        ):
+            manifest = workspace_manager.create_new_worktree(
+                repo=repo,
+                source=source,
+                storage_host=host,
+                branch_name="feature/my-branch",
+            )
+
+        destination = host.root / "evo-web" / "feature" / "my-branch"
+        self.assertEqual(Path(manifest["repos"][0]["path"]), destination)
+        self.assertEqual(manifest["repos"][0]["branch"], "feature/my-branch")
+        add.assert_called_once()
+        self.assertEqual(add.call_args.args[:2], (source, destination))
+        open_worktree.assert_called_once_with(manifest)
+
+    def test_open_managed_worktree_uses_herdr_worktree_membership(self):
+        path = Path("/projects/ebay/evo-web/feature/test")
+        manifest = {
+            "repos": [
+                {
+                    "source": "/projects/ebay/evo-web/main",
+                    "path": str(path),
+                    "branch": "feature/test",
+                    "full_name": "eBay/evo-web",
+                }
+            ]
+        }
+        with (
+            mock.patch.object(Path, "is_dir", return_value=True),
+            mock.patch.object(
+                workspace_manager, "active_workspace_for", return_value=""
+            ),
+            mock.patch.object(
+                workspace_manager,
+                "json_command",
+                return_value={"workspace_id": "workspace", "pane_id": "pane"},
+            ) as command,
+            mock.patch.object(
+                workspace_manager, "start_dependency_install"
+            ) as install,
+            mock.patch.object(workspace_manager, "start_pi") as start_pi,
+        ):
+            workspace_manager.open_managed_worktree(manifest)
+
+        command.assert_called_once_with(
+            [
+                "herdr",
+                "worktree",
+                "open",
+                "--cwd",
+                "/projects/ebay/evo-web/main",
+                "--path",
+                str(path),
+                "--label",
+                "feature/test",
+                "--focus",
+            ]
+        )
+        install.assert_called_once_with(path)
+        start_pi.assert_called_once_with("pane", path)
+
     def test_new_herdr_workspace_installs_each_directory_in_background(self):
         first = Path("/workspace/first")
         second = Path("/workspace/second")
@@ -652,7 +886,7 @@ class WorkspaceManagerTest(unittest.TestCase):
             self.assertTrue(workspace_manager.path_contains(root, child))
             self.assertFalse(workspace_manager.path_contains(root, sibling))
 
-    def test_local_projects_includes_every_folder_except_herdr_state(self):
+    def test_local_projects_includes_git_folders_only(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             git_repo = root / "repo"
@@ -675,7 +909,7 @@ class WorkspaceManagerTest(unittest.TestCase):
 
             self.assertEqual(
                 [path.name for _, path in projects],
-                [".dotfiles", "notes", "repo"],
+                ["repo"],
             )
 
     def test_current_workspace_to_close_uses_focused_workspace(self):
@@ -937,6 +1171,69 @@ class WorkspaceManagerTest(unittest.TestCase):
         self.assertEqual(result, 0)
         close.assert_called_once_with()
         open_.assert_not_called()
+
+    def test_nested_worktree_is_ignored_and_exclusion_is_removed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "workspace"
+            source.mkdir()
+
+            def git(*args):
+                return subprocess.run(
+                    ["git", "-C", str(source), *args],
+                    check=True,
+                    text=True,
+                    capture_output=True,
+                )
+
+            git("init", "-b", "main")
+            (source / "README.md").write_text("test\n", encoding="utf-8")
+            git("add", "README.md")
+            git(
+                "-c",
+                "user.name=Workspace Test",
+                "-c",
+                "user.email=workspace@example.test",
+                "-c",
+                "commit.gpgSign=false",
+                "commit",
+                "-m",
+                "initial",
+            )
+            git(
+                "update-ref",
+                "refs/remotes/origin/main",
+                "refs/heads/main",
+            )
+
+            destination = source / "feature" / "test"
+            workspace_manager.add_worktree(
+                source,
+                destination,
+                {
+                    "branch": "feature/test",
+                    "start_point": "origin/main",
+                    "create": True,
+                },
+            )
+
+            self.assertEqual(git("status", "--porcelain").stdout, "")
+            exclude_path = Path(
+                git("rev-parse", "--git-path", "info/exclude").stdout.strip()
+            )
+            if not exclude_path.is_absolute():
+                exclude_path = source / exclude_path
+            self.assertIn(
+                "/feature/test/",
+                exclude_path.read_text(encoding="utf-8").splitlines(),
+            )
+
+            workspace_manager.remove_worktree(source, destination)
+
+            self.assertFalse(destination.exists())
+            self.assertNotIn(
+                "# herdr-worktree /feature/test/",
+                exclude_path.read_text(encoding="utf-8"),
+            )
 
     def test_add_and_remove_new_branch_worktree(self):
         with tempfile.TemporaryDirectory() as directory:
