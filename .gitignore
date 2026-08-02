@@ -4,6 +4,8 @@ bin/.local/share
 bin/.local/state
 agents/.agents/.skill-lock.json
 pi/.pi/agent/auth.json
+pi/.pi/agent/models-store.json
+pi/.pi/agent/trust.json
 pi/.pi/agent/sessions/
 nvim/.config/nvim/parser/
 nvim/.config/nvim/lazy-lock.json
