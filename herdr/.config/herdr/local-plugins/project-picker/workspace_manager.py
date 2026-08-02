@@ -221,7 +221,7 @@ def choose_one_event(
 
 
 def fzf_worktree_select_event(
-    rows: Sequence[tuple[str, str, str]],
+    rows: Sequence[tuple[str, str, str, str]],
     *,
     prompt: str,
     header: str = "",
@@ -235,9 +235,10 @@ def fzf_worktree_select_event(
         FZF,
         "--delimiter=\t",
         "--with-nth=1",
-        "--id-nth=3",
+        "--id-nth=4",
         "--track",
         "--no-sort",
+        "--disabled",
         f"--prompt={prompt}",
         "--layout=reverse",
         "--border=rounded",
@@ -252,11 +253,12 @@ def fzf_worktree_select_event(
         state_path = temporary / "actions"
         candidates_path = temporary / "candidates"
         awk_path = temporary / "render.awk"
+        filter_path = temporary / "filter.sh"
         state_path.write_text("", encoding="utf-8")
         candidates_path.write_text(
             "".join(
-                f"{open_label}\t{new_label}\t{key}\n"
-                for open_label, new_label, key in rows
+                f"{open_label}\t{new_label}\t{workspace}\t{key}\n"
+                for open_label, new_label, key, workspace in rows
             ),
             encoding="utf-8",
         )
@@ -269,8 +271,8 @@ def fzf_worktree_select_event(
     close(state)
 }
 {
-    label = actions[$3] == "new" ? $2 : $1
-    print label, $2, $3
+    label = actions[$4] == "new" ? $2 : $1
+    print label, $2, $3, $4
 }
 """,
             encoding="utf-8",
@@ -282,13 +284,23 @@ def fzf_worktree_select_event(
             "awk -F '\\t' -v OFS='\\t' "
             f"-v state={quoted_state} -f {quoted_awk} {quoted_candidates}"
         )
-        bindings = []
+        filter_path.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "query=${1-}\n"
+            f"{render} | {shlex.quote(FZF)} --delimiter=$'\\t' "
+            "--nth=3 --filter=\"$query\" --no-sort\n",
+            encoding="utf-8",
+        )
+        filter_command = f"bash {shlex.quote(str(filter_path))} {{q}}"
+        bindings = [f"change:reload-sync({filter_command})"]
         for key, action in (("left", "open"), ("right", "new")):
             update = (
-                f"printf '%s\\t{action}\\n' {{3}} >> {quoted_state}"
+                f"printf '%s\\t{action}\\n' {{4}} >> {quoted_state}"
             )
             bindings.append(
-                f"{key}:execute-silent({update})+reload-sync({render})"
+                f"{key}:execute-silent({update})"
+                f"+reload-sync({filter_command})"
             )
         options.append(f"--bind={','.join(bindings)}")
 
@@ -1255,9 +1267,50 @@ def worktree_display_name(record: WorktreeRecord) -> str:
     return f"{repository}  {worktree_name}"
 
 
-def worktree_row_label(record: WorktreeRecord, action: str = "open") -> str:
+def worktree_group_name(record: WorktreeRecord) -> str:
+    return workspace_name_for_path(record.host, record.path, record.repo)
+
+
+def grouped_worktrees(
+    records: Sequence[WorktreeRecord],
+) -> list[tuple[str, list[tuple[int, WorktreeRecord]]]]:
+    """Keep each workspace's worktrees together in picker order."""
+
+    groups: dict[str, list[tuple[int, WorktreeRecord]]] = {}
+    labels: dict[str, str] = {}
+    for index, record in enumerate(records):
+        name = worktree_group_name(record)
+        key = f"{record.host.key}:{name.casefold()}"
+        groups.setdefault(key, []).append((index, record))
+        labels.setdefault(key, name)
+    return [(labels[key], group) for key, group in groups.items()]
+
+
+def worktree_tree_name(record: WorktreeRecord, workspace_name: str) -> str:
+    workspace_root = record.host.root / workspace_name
+    try:
+        relative = record.path.resolve().relative_to(workspace_root.resolve())
+    except (OSError, ValueError):
+        relative = Path(record.path.name)
+    if relative.parts:
+        return relative.as_posix()
+    return record.branch or record.path.name
+
+
+def worktree_row_label(
+    record: WorktreeRecord,
+    action: str = "open",
+    *,
+    prefix: str = "",
+    workspace_name: str = "",
+) -> str:
     actions = "[open] new" if action == "open" else "open [new]"
-    return f"{record.host.label:<9}  {worktree_display_name(record)}   {actions}"
+    name = (
+        worktree_tree_name(record, workspace_name)
+        if workspace_name
+        else worktree_display_name(record)
+    )
+    return f"{prefix}{name}   {actions}"
 
 
 def worktree_history_key(record: WorktreeRecord) -> str:
@@ -1971,17 +2024,16 @@ def create_herdr_workspace(
         start_pi(tab_pane_id, path)
 
 
-def open_managed_worktree(manifest: dict[str, Any]) -> None:
-    repo = manifest["repos"][0]
-    source = Path(repo["source"])
-    path = Path(repo["path"])
+def open_worktree(
+    *, source: Path, path: Path, label: str
+) -> None:
     if not path.is_dir():
         raise WorkspaceError(f"Worktree folder is missing: {path}")
     existing = active_workspace_for([path])
     if existing:
         run([HERDR, "workspace", "focus", existing])
         return
-    worktree_label = str(repo.get("branch") or path.name)
+
     opened = json_command(
         [
             HERDR,
@@ -1992,7 +2044,7 @@ def open_managed_worktree(manifest: dict[str, Any]) -> None:
             "--path",
             str(path),
             "--label",
-            worktree_label,
+            label,
             "--focus",
         ]
     )
@@ -2001,6 +2053,16 @@ def open_managed_worktree(manifest: dict[str, Any]) -> None:
         raise WorkspaceError("Herdr did not return a worktree root pane.")
     start_dependency_install(path)
     start_pi(pane_id, path)
+
+
+def open_managed_worktree(manifest: dict[str, Any]) -> None:
+    repo = manifest["repos"][0]
+    path = Path(repo["path"])
+    open_worktree(
+        source=Path(repo["source"]),
+        path=path,
+        label=str(repo.get("branch") or path.name),
+    )
 
 
 def open_managed_workspace(manifest: dict[str, Any]) -> None:
@@ -2050,15 +2112,10 @@ def local_projects(all_hosts: Sequence[Host]) -> list[tuple[Host, Path]]:
 
 
 def open_existing_worktree(record: WorktreeRecord) -> None:
-    if not record.path.is_dir():
-        raise WorkspaceError(f"Worktree folder is missing: {record.path}")
-    existing = active_workspace_for([record.path])
-    if existing:
-        run([HERDR, "workspace", "focus", existing])
-        return
-    create_herdr_workspace(
-        name=worktree_display_name(record),
-        directories=[(str(record.repo["full_name"]), record.path)],
+    open_worktree(
+        source=record.source,
+        path=record.path,
+        label=record.branch or record.path.name,
     )
 
 
@@ -2067,29 +2124,62 @@ def choose_worktree_action(
 ) -> tuple[str, str]:
     """Return a picker key and either `open` or `new`."""
 
-    rows: list[tuple[str, str, str]] = [
+    rows: list[tuple[str, str, str, str]] = [
         (
             "+  Create a new worktree from GitHub",
             "+  Create a new worktree from GitHub",
             "action:create",
+            "create workspace",
         ),
         (
             "-  Close the current workspace",
             "-  Close the current workspace",
             "action:close",
+            "close workspace",
         ),
     ]
     choices: dict[str, WorktreeRecord] = {}
-    for index, record in enumerate(records):
-        key = f"worktree:{index}"
-        choices[key] = record
+    workspace_choices: dict[str, str] = {}
+    for group_index, (workspace_name, group) in enumerate(
+        grouped_worktrees(records)
+    ):
+        workspace_key = f"workspace:{group_index}"
+        first_record_index, _ = group[0]
+        workspace_choices[workspace_key] = f"worktree:{first_record_index}"
+        host_label = group[0][1].host.label
+        workspace_label = f"{host_label:<9}  {workspace_name}"
+        workspace_search = f"{host_label} {workspace_name}"
         rows.append(
             (
-                worktree_row_label(record, "open"),
-                worktree_row_label(record, "new"),
-                key,
+                workspace_label,
+                workspace_label,
+                workspace_key,
+                workspace_search,
             )
         )
+        for child_index, (record_index, record) in enumerate(group):
+            key = f"worktree:{record_index}"
+            choices[key] = record
+            connector = "└─" if child_index == len(group) - 1 else "├─"
+            prefix = f"{'':11}{connector} "
+            rows.append(
+                (
+                    worktree_row_label(
+                        record,
+                        "open",
+                        prefix=prefix,
+                        workspace_name=workspace_name,
+                    ),
+                    worktree_row_label(
+                        record,
+                        "new",
+                        prefix=prefix,
+                        workspace_name=workspace_name,
+                    ),
+                    key,
+                    workspace_search,
+                )
+            )
 
     choice, action = fzf_worktree_select_event(
         rows,
@@ -2101,6 +2191,8 @@ def choose_worktree_action(
     )
     if choice in {"action:create", "action:close"}:
         return choice, "open"
+    if choice in workspace_choices:
+        return workspace_choices[choice], "open"
     if choice not in choices:
         raise WorkspaceError("The selected worktree is no longer available.")
     return choice, action

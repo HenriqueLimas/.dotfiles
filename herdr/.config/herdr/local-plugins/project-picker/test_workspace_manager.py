@@ -156,14 +156,100 @@ class WorkspaceManagerTest(unittest.TestCase):
 
         self.assertEqual((choice, action), ("worktree:0", "new"))
         rows = choose.call_args.args[0]
-        self.assertIn("[open] new", rows[2][0])
-        self.assertIn("open [new]", rows[2][1])
+        self.assertIn("evo-web", rows[2][0])
+        self.assertIn("└─", rows[3][0])
+        self.assertIn("[open] new", rows[3][0])
+        self.assertIn("open [new]", rows[3][1])
+
+    def test_worktree_picker_groups_worktrees_under_workspace(self):
+        host = workspace_manager.Host(
+            key="github",
+            label="GitHub",
+            hostname="github.com",
+            root=Path("/projects"),
+            public_repos_only=True,
+        )
+        repo = {
+            "host_key": "github",
+            "hostname": host.hostname,
+            "full_name": "team/repo",
+            "default_branch": "main",
+        }
+        records = [
+            workspace_manager.WorktreeRecord(
+                host=host,
+                path=Path(f"/projects/repo/{name}"),
+                source=Path("/projects/repo/main"),
+                repo=repo,
+                branch=name,
+            )
+            for name in ("main", "feature")
+        ]
+        with mock.patch.object(
+            workspace_manager,
+            "fzf_worktree_select_event",
+            return_value=("workspace:0", "new"),
+        ) as choose:
+            choice, action = workspace_manager.choose_worktree_action(records)
+
+        self.assertEqual((choice, action), ("worktree:0", "open"))
+        rows = choose.call_args.args[0]
+        self.assertIn("repo", rows[2][0])
+        self.assertIn("├─", rows[3][0])
+        self.assertIn("└─", rows[4][0])
+        self.assertEqual(rows[2][3], "GitHub repo")
+        self.assertEqual(rows[3][3], "GitHub repo")
+        self.assertEqual(rows[4][3], "GitHub repo")
+
+    def test_open_existing_worktree_uses_herdr_worktree_open(self):
+        record = workspace_manager.WorktreeRecord(
+            host=workspace_manager.Host(
+                key="github",
+                label="GitHub",
+                hostname="github.com",
+                root=Path("/projects"),
+                public_repos_only=True,
+            ),
+            path=Path("/projects/repo/feature"),
+            source=Path("/projects/repo/main"),
+            repo={"full_name": "team/repo"},
+            branch="feature",
+        )
+        with (
+            mock.patch.object(Path, "is_dir", return_value=True),
+            mock.patch.object(
+                workspace_manager, "active_workspace_for", return_value=""
+            ),
+            mock.patch.object(
+                workspace_manager,
+                "json_command",
+                return_value={"pane_id": "pane"},
+            ) as command,
+            mock.patch.object(workspace_manager, "start_dependency_install"),
+            mock.patch.object(workspace_manager, "start_pi"),
+        ):
+            workspace_manager.open_existing_worktree(record)
+
+        command.assert_called_once_with(
+            [
+                "herdr",
+                "worktree",
+                "open",
+                "--cwd",
+                "/projects/repo/main",
+                "--path",
+                "/projects/repo/feature",
+                "--label",
+                "feature",
+                "--focus",
+            ]
+        )
 
     def test_worktree_picker_uses_native_arrow_bindings(self):
         completed = subprocess.CompletedProcess(
             args=["fzf"],
             returncode=0,
-            stdout="open\tnew\tworktree:0\n",
+            stdout="open\tnew\tworkspace\tworktree:0\n",
             stderr="",
         )
         with mock.patch.object(
@@ -172,18 +258,21 @@ class WorkspaceManagerTest(unittest.TestCase):
             return_value=completed,
         ) as run:
             selected = workspace_manager.fzf_worktree_select_event(
-                [("open", "new", "worktree:0")],
+                [("open", "new", "worktree:0", "workspace")],
                 prompt="Workspace> ",
             )
 
         self.assertEqual(selected, ("worktree:0", "open"))
         options = run.call_args.args[0]
         self.assertIn("--track", options)
-        self.assertIn("--id-nth=3", options)
+        self.assertIn("--disabled", options)
+        self.assertIn("--id-nth=4", options)
         binding = next(option for option in options if option.startswith("--bind="))
+        self.assertIn("change:reload-sync", binding)
         self.assertIn("left:execute-silent", binding)
         self.assertIn("right:execute-silent", binding)
         self.assertIn("reload-sync", binding)
+        self.assertIn("{4}", binding)
         self.assertNotIn("--expect=", " ".join(options))
 
     def test_default_branch_selection_never_prompts_for_another_branch(self):
