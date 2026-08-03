@@ -1168,6 +1168,7 @@ def worktrees_for_source(
         full_name = source.name
         repo_host = storage_host
 
+    default_branch = default_branch_for_source(source_path, "")
     records: list[WorktreeRecord] = []
     for entry in entries:
         if entry.get("bare"):
@@ -1191,7 +1192,7 @@ def worktrees_for_source(
             "hostname": hostname,
             "full_name": full_name,
             "description": "",
-            "default_branch": "",
+            "default_branch": default_branch,
         }
         records.append(
             WorktreeRecord(
@@ -1283,7 +1284,22 @@ def grouped_worktrees(
         key = f"{record.host.key}:{name.casefold()}"
         groups.setdefault(key, []).append((index, record))
         labels.setdefault(key, name)
-    return [(labels[key], group) for key, group in groups.items()]
+    result = []
+    for key, group in groups.items():
+        group.sort(
+            key=lambda item: (
+                0
+                if (
+                    item[1].repo.get("default_branch")
+                    and item[1].branch
+                    == item[1].repo["default_branch"]
+                )
+                else 1,
+                item[0],
+            )
+        )
+        result.append((labels[key], group))
+    return result
 
 
 def worktree_tree_name(record: WorktreeRecord, workspace_name: str) -> str:
@@ -1294,7 +1310,7 @@ def worktree_tree_name(record: WorktreeRecord, workspace_name: str) -> str:
         relative = Path(record.path.name)
     if relative.parts:
         return relative.as_posix()
-    return record.branch or record.path.name
+    return "main"
 
 
 def worktree_row_label(
@@ -1802,6 +1818,7 @@ def create_new_worktree(
         manifest = {
             "version": 2,
             "name": workspace_label,
+            "workspace_name": workspace_name,
             "slug": manifest_slug,
             "repos": [
                 {
@@ -2025,15 +2042,54 @@ def create_herdr_workspace(
 
 
 def open_worktree(
-    *, source: Path, path: Path, label: str
+    *,
+    source: Path,
+    path: Path,
+    workspace_name: str,
+    branch: str = "",
 ) -> None:
     if not path.is_dir():
         raise WorkspaceError(f"Worktree folder is missing: {path}")
+
+    is_linked_worktree = source.resolve() != path.resolve()
+    if is_linked_worktree:
+        parent_workspace = active_workspace_for([source])
+        if parent_workspace:
+            run(
+                [
+                    HERDR,
+                    "workspace",
+                    "rename",
+                    parent_workspace,
+                    workspace_name,
+                ]
+            )
+        else:
+            json_command(
+                [
+                    HERDR,
+                    "worktree",
+                    "open",
+                    "--cwd",
+                    str(source),
+                    "--path",
+                    str(source),
+                    "--label",
+                    workspace_name,
+                    "--no-focus",
+                ]
+            )
+
     existing = active_workspace_for([path])
     if existing:
+        if is_linked_worktree and branch:
+            run([HERDR, "workspace", "rename", existing, branch])
         run([HERDR, "workspace", "focus", existing])
         return
 
+    label_args = (
+        [] if is_linked_worktree else ["--label", workspace_name]
+    )
     opened = json_command(
         [
             HERDR,
@@ -2043,8 +2099,7 @@ def open_worktree(
             str(source),
             "--path",
             str(path),
-            "--label",
-            label,
+            *label_args,
             "--focus",
         ]
     )
@@ -2058,10 +2113,16 @@ def open_worktree(
 def open_managed_worktree(manifest: dict[str, Any]) -> None:
     repo = manifest["repos"][0]
     path = Path(repo["path"])
+    workspace_name = clean_field(manifest.get("workspace_name"))
+    if not workspace_name:
+        workspace_name = clean_field(manifest.get("name")).partition("/")[0]
+    if not workspace_name:
+        workspace_name = path.parent.name
     open_worktree(
         source=Path(repo["source"]),
         path=path,
-        label=str(repo.get("branch") or path.name),
+        workspace_name=workspace_name,
+        branch=str(repo.get("branch") or ""),
     )
 
 
@@ -2115,7 +2176,8 @@ def open_existing_worktree(record: WorktreeRecord) -> None:
     open_worktree(
         source=record.source,
         path=record.path,
-        label=record.branch or record.path.name,
+        workspace_name=worktree_group_name(record),
+        branch=record.branch,
     )
 
 

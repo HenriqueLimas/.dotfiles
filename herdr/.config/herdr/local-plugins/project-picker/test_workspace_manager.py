@@ -201,6 +201,117 @@ class WorkspaceManagerTest(unittest.TestCase):
         self.assertEqual(rows[3][3], "GitHub repo")
         self.assertEqual(rows[4][3], "GitHub repo")
 
+    def test_worktree_tree_uses_path_beneath_workspace(self):
+        host = workspace_manager.Host(
+            key="github",
+            label="GitHub",
+            hostname="github.com",
+            root=Path("/projects"),
+            public_repos_only=True,
+        )
+        record = workspace_manager.WorktreeRecord(
+            host=host,
+            path=Path("/projects/repo/local-folder"),
+            source=Path("/projects/repo/main"),
+            repo={"full_name": "team/repo"},
+            branch="feature/branch-name",
+        )
+
+        self.assertEqual(
+            workspace_manager.worktree_tree_name(record, "repo"),
+            "local-folder",
+        )
+        root_record = workspace_manager.WorktreeRecord(
+            host=host,
+            path=Path("/projects/repo"),
+            source=Path("/projects/repo"),
+            repo={"full_name": "team/repo"},
+            branch="master",
+        )
+        self.assertEqual(
+            workspace_manager.worktree_tree_name(root_record, "repo"),
+            "main",
+        )
+
+    def test_grouped_worktrees_puts_default_branch_first(self):
+        host = workspace_manager.Host(
+            key="github",
+            label="GitHub",
+            hostname="github.com",
+            root=Path("/projects"),
+            public_repos_only=True,
+        )
+        repo = {
+            "host_key": "github",
+            "hostname": host.hostname,
+            "full_name": "team/repo",
+            "default_branch": "main",
+        }
+        records = [
+            workspace_manager.WorktreeRecord(
+                host=host,
+                path=Path(f"/projects/repo/{branch}"),
+                source=Path("/projects/repo/main"),
+                repo=repo,
+                branch=branch,
+            )
+            for branch in ("feature", "main", "release")
+        ]
+
+        groups = workspace_manager.grouped_worktrees(records)
+
+        self.assertEqual(
+            [record.branch for _, record in groups[0][1]],
+            ["main", "feature", "release"],
+        )
+
+    def test_open_worktree_repairs_existing_sidebar_labels(self):
+        path = Path("/projects/workspace/feature")
+        with (
+            mock.patch.object(Path, "is_dir", return_value=True),
+            mock.patch.object(
+                workspace_manager,
+                "active_workspace_for",
+                side_effect=["parent-id", "worktree-id"],
+            ),
+            mock.patch.object(workspace_manager, "run") as run,
+            mock.patch.object(workspace_manager, "json_command") as command,
+        ):
+            workspace_manager.open_worktree(
+                source=Path("/projects/workspace/main"),
+                path=path,
+                workspace_name="workspace",
+                branch="feature/test",
+            )
+
+        self.assertEqual(
+            run.call_args_list,
+            [
+                mock.call(
+                    [
+                        "herdr",
+                        "workspace",
+                        "rename",
+                        "parent-id",
+                        "workspace",
+                    ]
+                ),
+                mock.call(
+                    [
+                        "herdr",
+                        "workspace",
+                        "rename",
+                        "worktree-id",
+                        "feature/test",
+                    ]
+                ),
+                mock.call(
+                    ["herdr", "workspace", "focus", "worktree-id"]
+                ),
+            ],
+        )
+        command.assert_not_called()
+
     def test_open_existing_worktree_uses_herdr_worktree_open(self):
         record = workspace_manager.WorktreeRecord(
             host=workspace_manager.Host(
@@ -230,19 +341,36 @@ class WorkspaceManagerTest(unittest.TestCase):
         ):
             workspace_manager.open_existing_worktree(record)
 
-        command.assert_called_once_with(
+        self.assertEqual(
+            command.call_args_list,
             [
-                "herdr",
-                "worktree",
-                "open",
-                "--cwd",
-                "/projects/repo/main",
-                "--path",
-                "/projects/repo/feature",
-                "--label",
-                "feature",
-                "--focus",
-            ]
+                mock.call(
+                    [
+                        "herdr",
+                        "worktree",
+                        "open",
+                        "--cwd",
+                        "/projects/repo/main",
+                        "--path",
+                        "/projects/repo/main",
+                        "--label",
+                        "repo",
+                        "--no-focus",
+                    ]
+                ),
+                mock.call(
+                    [
+                        "herdr",
+                        "worktree",
+                        "open",
+                        "--cwd",
+                        "/projects/repo/main",
+                        "--path",
+                        "/projects/repo/feature",
+                        "--focus",
+                    ]
+                ),
+            ],
         )
 
     def test_worktree_picker_uses_native_arrow_bindings(self):
@@ -351,6 +479,7 @@ class WorkspaceManagerTest(unittest.TestCase):
         destination = host.root / "evo-web" / "feature" / "my-branch"
         self.assertEqual(Path(manifest["repos"][0]["path"]), destination)
         self.assertEqual(manifest["repos"][0]["branch"], "feature/my-branch")
+        self.assertEqual(manifest["workspace_name"], "evo-web")
         add.assert_called_once()
         self.assertEqual(add.call_args.args[:2], (source, destination))
         open_worktree.assert_called_once_with(manifest)
@@ -358,6 +487,7 @@ class WorkspaceManagerTest(unittest.TestCase):
     def test_open_managed_worktree_uses_herdr_worktree_membership(self):
         path = Path("/projects/ebay/evo-web/feature/test")
         manifest = {
+            "workspace_name": "evo-web",
             "repos": [
                 {
                     "source": "/projects/ebay/evo-web/main",
@@ -384,19 +514,36 @@ class WorkspaceManagerTest(unittest.TestCase):
         ):
             workspace_manager.open_managed_worktree(manifest)
 
-        command.assert_called_once_with(
+        self.assertEqual(
+            command.call_args_list,
             [
-                "herdr",
-                "worktree",
-                "open",
-                "--cwd",
-                "/projects/ebay/evo-web/main",
-                "--path",
-                str(path),
-                "--label",
-                "feature/test",
-                "--focus",
-            ]
+                mock.call(
+                    [
+                        "herdr",
+                        "worktree",
+                        "open",
+                        "--cwd",
+                        "/projects/ebay/evo-web/main",
+                        "--path",
+                        "/projects/ebay/evo-web/main",
+                        "--label",
+                        "evo-web",
+                        "--no-focus",
+                    ]
+                ),
+                mock.call(
+                    [
+                        "herdr",
+                        "worktree",
+                        "open",
+                        "--cwd",
+                        "/projects/ebay/evo-web/main",
+                        "--path",
+                        str(path),
+                        "--focus",
+                    ]
+                ),
+            ],
         )
         install.assert_called_once_with(path)
         start_pi.assert_called_once_with("pane", path)
