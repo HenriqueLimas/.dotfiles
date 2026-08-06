@@ -2193,12 +2193,6 @@ def choose_worktree_action(
             "action:create",
             "create workspace",
         ),
-        (
-            "-  Close the current workspace",
-            "-  Close the current workspace",
-            "action:close",
-            "close workspace",
-        ),
     ]
     choices: dict[str, WorktreeRecord] = {}
     workspace_choices: dict[str, str] = {}
@@ -2251,7 +2245,7 @@ def choose_worktree_action(
             "[open] or [new]"
         ),
     )
-    if choice in {"action:create", "action:close"}:
+    if choice == "action:create":
         return choice, "open"
     if choice in workspace_choices:
         return workspace_choices[choice], "open"
@@ -2274,9 +2268,6 @@ def open_workspace(all_hosts: Sequence[Host]) -> None:
     if choice == "action:create":
         create_workspace(all_hosts)
         return
-    if choice == "action:close":
-        close_workspace()
-        return
 
     record = choices[choice]
     mark_recent(history, worktree_history_key(record))
@@ -2290,304 +2281,10 @@ def open_workspace(all_hosts: Sequence[Host]) -> None:
         open_existing_worktree(record)
 
 
-def workspace_records() -> list[dict[str, Any]]:
-    value = json_command([HERDR, "workspace", "list"])
-    records = next(nested_values(value, "workspaces"), [])
-    return [record for record in records if isinstance(record, dict)]
-
-
-def current_workspace_to_close() -> dict[str, Any]:
-    records = workspace_records()
-    focused = next(
-        (
-            record
-            for record in records
-            if record.get("focused") and record.get("workspace_id")
-        ),
-        None,
-    )
-    if focused:
-        return focused
-
-    active = (
-        os.environ.get("HERDR_ACTIVE_WORKSPACE_ID")
-        or os.environ.get("HERDR_WORKSPACE_ID")
-        or ""
-    )
-    from_environment = next(
-        (
-            record
-            for record in records
-            if str(record.get("workspace_id") or "") == active
-        ),
-        None,
-    )
-    if from_environment:
-        return from_environment
-    raise WorkspaceError("Herdr did not report a current workspace to close.")
-
-
-def manifest_for_workspace(
-    workspace_id: str, manifests: Sequence[dict[str, Any]]
-) -> dict[str, Any] | None:
-    workspace_panes = [
-        pane
-        for pane in pane_records()
-        if str(pane.get("workspace_id") or "") == workspace_id
-    ]
-    for manifest in manifests:
-        paths = [
-            Path(repo["path"])
-            for repo in manifest["repos"]
-            if repo.get("path")
-        ]
-        if any(
-            cwd
-            and any(path_contains(path, Path(cwd)) for path in paths)
-            for cwd in (pane.get("cwd") for pane in workspace_panes)
-        ):
-            return manifest
-    return None
-
-
-def delete_managed_workspace(manifest: dict[str, Any]) -> None:
-    require_commands(GIT)
-    for repo in manifest["repos"]:
-        path = Path(repo["path"])
-        if path.exists():
-            remove_worktree(Path(repo["source"]), path, force=True)
-    path = manifest_path(manifest["slug"])
-    if path.exists():
-        path.unlink()
-
-
-def project_folders_for_workspace(
-    workspace_id: str, all_hosts: Sequence[Host]
-) -> list[Path]:
-    folders: set[Path] = set()
-    workspace_cwds = [
-        Path(pane["cwd"])
-        for pane in pane_records()
-        if str(pane.get("workspace_id") or "") == workspace_id
-        and pane.get("cwd")
-    ]
-    for host in all_hosts:
-        try:
-            root = host.root.resolve()
-        except OSError:
-            continue
-        for cwd in workspace_cwds:
-            try:
-                relative = cwd.resolve().relative_to(root)
-            except (OSError, ValueError):
-                continue
-            if not relative.parts or relative.parts[0] == ".herdr":
-                continue
-            project = host.root / relative.parts[0]
-            if project.is_dir():
-                folders.add(project)
-    return sorted(folders, key=lambda path: str(path).lower())
-
-
-def delete_project_folders(
-    folders: Sequence[Path], all_hosts: Sequence[Host]
-) -> None:
-    allowed_roots = {host.root.resolve() for host in all_hosts}
-    for folder in folders:
-        if (
-            folder.name == ".herdr"
-            or folder.parent.resolve() not in allowed_roots
-        ):
-            raise WorkspaceError(
-                f"Refusing to delete a folder outside configured roots: {folder}"
-            )
-        try:
-            if folder.is_symlink():
-                folder.unlink()
-            elif folder.exists():
-                shutil.rmtree(folder)
-        except OSError as error:
-            raise WorkspaceError(
-                f"Could not completely delete {folder}: {error}"
-            ) from error
-
-
-def folder_choice_labels(count: int) -> tuple[str, str]:
-    noun = "folder" if count == 1 else "folders"
-    return (
-        f"Close workspace and keep {noun}",
-        f"Close workspace and permanently delete {noun}",
-    )
-
-
-def background_task_log_path() -> Path:
-    return state_root() / "background-tasks.log"
-
-
-def start_background_workspace_deletion(
-    workspace_id: str,
-    manifest: dict[str, Any] | None,
-    folders: Sequence[Path],
-) -> None:
-    if manifest:
-        action = "_background-delete-managed"
-        arguments = [workspace_id, str(manifest["slug"])]
-    else:
-        action = "_background-delete-projects"
-        arguments = [workspace_id, *(str(folder) for folder in folders)]
-    command = [
-        sys.executable,
-        str(Path(__file__).resolve()),
-        action,
-        *arguments,
-    ]
-    log_path = background_task_log_path()
+def main() -> int:
     try:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("ab") as log:
-            subprocess.Popen(
-                command,
-                cwd=Path.home(),
-                stdin=subprocess.DEVNULL,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
-    except OSError as error:
-        raise WorkspaceError(
-            f"Could not start background workspace deletion: {error}"
-        ) from error
-
-
-def perform_background_deletion(
-    action: str, arguments: Sequence[str]
-) -> None:
-    if len(arguments) < 2:
-        raise WorkspaceError("Background deletion arguments are incomplete.")
-    workspace_id = arguments[0]
-    run([HERDR, "workspace", "close", workspace_id])
-    if action == "_background-delete-managed":
-        slug = arguments[1]
-        manifest = next(
-            (
-                manifest
-                for manifest in load_manifests()
-                if str(manifest.get("slug") or "") == slug
-            ),
-            None,
-        )
-        if manifest is None:
-            raise WorkspaceError(
-                f"Managed workspace manifest no longer exists: {slug}"
-            )
-        delete_managed_workspace(manifest)
-        return
-    if action == "_background-delete-projects":
-        delete_project_folders(
-            [Path(folder) for folder in arguments[1:]],
-            hosts(),
-        )
-        return
-    raise WorkspaceError(f"Unknown background deletion action: {action}")
-
-
-def close_workspace(workspace: dict[str, Any] | None = None) -> None:
-    workspace = workspace or current_workspace_to_close()
-    workspace_id = str(workspace["workspace_id"])
-    label = clean_field(
-        workspace.get("label") or workspace.get("name") or workspace_id
-    )
-    all_hosts = hosts()
-    manifest = manifest_for_workspace(workspace_id, load_manifests())
-    if manifest:
-        folders = [
-            Path(repo["path"])
-            for repo in manifest["repos"]
-            if repo.get("path")
-        ]
-    else:
-        folders = project_folders_for_workspace(workspace_id, all_hosts)
-
-    if folders:
-        keep_label, delete_label = folder_choice_labels(len(folders))
-        folder_list = "\n".join(str(folder) for folder in folders)
-        choice = choose_one(
-            [
-                (keep_label, "keep"),
-                (delete_label, "delete"),
-                ("Cancel", "cancel"),
-            ],
-            prompt="Close current workspace> ",
-            header=f"{label}\n{folder_list}",
-        )
-    else:
-        choice = choose_one(
-            [
-                ("Close current workspace", "keep"),
-                ("Cancel", "cancel"),
-            ],
-            prompt="Close current workspace> ",
-            header=f"{label}\nNo project folder was found under configured roots.",
-        )
-
-    if choice == "cancel":
-        raise Cancelled
-    if choice == "delete":
-        start_background_workspace_deletion(
-            workspace_id,
-            manifest,
-            folders,
-        )
-        return
-    run([HERDR, "workspace", "close", workspace_id])
-
-
-def close_current_pane_or_workspace() -> None:
-    workspace = current_workspace_to_close()
-    workspace_id = str(workspace["workspace_id"])
-    pane_count = int(workspace.get("pane_count") or 0)
-    if pane_count <= 1:
-        close_workspace(workspace)
-        return
-
-    panes = [
-        pane
-        for pane in pane_records()
-        if str(pane.get("workspace_id") or "") == workspace_id
-    ]
-    pane = next((pane for pane in panes if pane.get("focused")), None)
-    if pane is None:
-        environment_pane_id = os.environ.get("HERDR_PANE_ID", "")
-        pane = next(
-            (
-                pane
-                for pane in panes
-                if str(pane.get("pane_id") or "") == environment_pane_id
-            ),
-            None,
-        )
-    if pane is None or not pane.get("pane_id"):
-        raise WorkspaceError("Herdr did not report a current pane to close.")
-    run([HERDR, "pane", "close", str(pane["pane_id"])])
-
-
-def main(
-    action: str = "open", action_arguments: Sequence[str] = ()
-) -> int:
-    try:
-        if action.startswith("_background-delete-"):
-            require_commands(HERDR)
-            perform_background_deletion(action, action_arguments)
-            return 0
         require_commands(HERDR, FZF, GIT)
-        if action == "open":
-            open_workspace(hosts())
-        elif action == "close":
-            close_workspace()
-        elif action == "close-pane":
-            close_current_pane_or_workspace()
-        else:
-            raise WorkspaceError(f"Unknown workspace action: {action}")
+        open_workspace(hosts())
         return 0
     except Cancelled:
         return 0
@@ -2599,5 +2296,4 @@ def main(
 
 
 if __name__ == "__main__":
-    action = sys.argv[1] if len(sys.argv) > 1 else "open"
-    raise SystemExit(main(action, sys.argv[2:]))
+    raise SystemExit(main())
