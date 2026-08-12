@@ -1060,6 +1060,19 @@ def default_branch_for_source(source: Path, fallback: str = "main") -> str:
     )
     if symbolic.startswith("origin/"):
         return symbolic.removeprefix("origin/")
+    if git_output(
+        source, "rev-parse", "--is-bare-repository", check=False
+    ) == "true":
+        symbolic = git_output(
+            source,
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "HEAD",
+            check=False,
+        )
+        if symbolic:
+            return symbolic
     return fallback
 
 
@@ -1129,7 +1142,6 @@ def worktrees_for_source(
     all_hosts: Sequence[Host],
     host_by_hostname: dict[str, Host],
 ) -> list[WorktreeRecord]:
-    source_path = source.resolve()
     entries = parse_worktree_list(
         git_output(
             source,
@@ -1139,21 +1151,32 @@ def worktrees_for_source(
             check=False,
         )
     )
-    if (source / ".git").exists():
-        primary = next(
-            (
-                entry
-                for entry in entries
-                if not entry.get("bare") and entry.get("path")
-            ),
-            None,
-        )
-        if primary:
-            source_path = Path(
-                str(primary["path"])
-            ).expanduser().resolve()
+    default_branch = default_branch_for_source(source, "")
+    primary = next(
+        (
+            entry
+            for entry in entries
+            if not entry.get("bare")
+            and entry.get("path")
+            and default_branch
+            and entry.get("branch") == default_branch
+        ),
+        None,
+    ) or next(
+        (
+            entry
+            for entry in entries
+            if not entry.get("bare") and entry.get("path")
+        ),
+        None,
+    )
+    source_path = (
+        Path(str(primary["path"])).expanduser().resolve()
+        if primary
+        else source.resolve()
+    )
     remote = git_output(
-        source_path,
+        source,
         "remote",
         "get-url",
         "origin",
@@ -1168,7 +1191,6 @@ def worktrees_for_source(
         full_name = source.name
         repo_host = storage_host
 
-    default_branch = default_branch_for_source(source_path, "")
     records: list[WorktreeRecord] = []
     for entry in entries:
         if entry.get("bare"):
@@ -1669,13 +1691,33 @@ def add_worktree(
 ) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     args = [GIT, "-C", str(source), "worktree", "add"]
-    if selection.get("reset"):
-        args.extend(("-B", str(selection["branch"])))
-    elif selection["create"]:
+    if selection.get("no_track"):
+        args.append("--no-track")
+    elif selection.get("track"):
+        args.append("--track")
+    if selection.get("create"):
         args.extend(("-b", str(selection["branch"])))
-    args.extend((str(destination), str(selection["start_point"])))
+    args.append(str(destination))
+    start_point = str(selection.get("start_point") or "")
+    if start_point:
+        args.append(start_point)
     run(args)
-    add_nested_worktree_exclusion(source, destination)
+    try:
+        add_nested_worktree_exclusion(source, destination)
+    except OSError:
+        run(
+            [
+                GIT,
+                "-C",
+                str(source),
+                "worktree",
+                "remove",
+                "--force",
+                str(destination),
+            ],
+            check=False,
+        )
+        raise
 
 
 def configure_github_worktree(
@@ -1736,21 +1778,72 @@ def workspace_name_for_path(
     return repository_workspace_name(repo)
 
 
-def default_branch_selection(
-    source: Path, repo: dict[str, Any]
-) -> dict[str, str | bool]:
-    """Fetch and select the repository's default branch, never another base."""
+def worktree_for_branch(source: Path, branch: str) -> Path | None:
+    """Return the live worktree currently checking out a local branch."""
+
+    entries = parse_worktree_list(
+        git_output(source, "worktree", "list", "--porcelain", check=False)
+    )
+    for entry in entries:
+        if entry.get("bare") or entry.get("branch") != branch:
+            continue
+        path = Path(str(entry["path"])).expanduser().resolve()
+        if path.is_dir():
+            return path
+    return None
+
+
+def ensure_default_worktree(
+    *,
+    repo: dict[str, Any],
+    source: Path,
+    storage_host: Host,
+    workspace_name: str,
+    signing_key: str = "",
+) -> tuple[Path, str]:
+    """Ensure the repository has a real default-branch checkout for Herdr."""
 
     default = str(repo.get("default_branch") or "")
     if not default:
         default = remote_default_branch(source)
     fetch_remote_branch(source, default)
-    return {
-        "branch": "",
-        "default_branch": default,
-        "start_point": f"origin/{default}",
-        "create": True,
-    }
+
+    existing = worktree_for_branch(source, default)
+    created = existing is None
+    if existing:
+        default_worktree = existing
+    else:
+        default_worktree = storage_host.root / workspace_name / default
+        if not path_contains(storage_host.root, default_worktree):
+            raise WorkspaceError(
+                f"Worktree path escapes the configured root: {default_worktree}"
+            )
+        if default_worktree.exists():
+            raise WorkspaceError(
+                f"Worktree folder already exists: {default_worktree}"
+            )
+        local = default in local_branches(source)
+        add_worktree(
+            source,
+            default_worktree,
+            {
+                "branch": default,
+                "start_point": default if local else f"origin/{default}",
+                "create": not local,
+                "track": not local,
+            },
+        )
+
+    if created and repo.get("host_key") == "github":
+        try:
+            configure_github_worktree(source, default_worktree, signing_key)
+        except WorkspaceError:
+            try:
+                remove_worktree(source, default_worktree)
+            except WorkspaceError:
+                pass
+            raise
+    return default_worktree, default
 
 
 def worktree_manifest_slug(repo: dict[str, Any], slug: str) -> str:
@@ -1765,25 +1858,69 @@ def create_new_worktree(
     branch_name: str | None = None,
     workspace_name: str | None = None,
 ) -> dict[str, Any]:
-    """Create one branch/worktree and open it as a one-repository workspace."""
+    """Create or check out one branch and open its repository workspace."""
 
     repo = dict(repo)
     branch = (branch_name or prompt_text("Branch name")).strip()
     if not branch:
         raise Cancelled
     validate_branch_name(branch)
-    selection = default_branch_selection(source, repo)
-    if (
-        branch in local_branches(source)
-        or branch in occupied_branches(source)
-        or remote_branch_exists(source, branch)
-    ):
-        raise WorkspaceError(
-            f"A branch or worktree named {branch!r} already exists."
-        )
 
     storage_host.root.mkdir(parents=True, exist_ok=True)
     workspace_name = workspace_name or repository_workspace_name(repo)
+    signing_key = ""
+    if repo.get("host_key") == "github":
+        require_commands(GPG)
+        signing_key = choose_gpg_signing_key(GITHUB_AUTHOR_EMAIL)
+    source, default_branch = ensure_default_worktree(
+        repo=repo,
+        source=source,
+        storage_host=storage_host,
+        workspace_name=workspace_name,
+        signing_key=signing_key,
+    )
+    repo["default_branch"] = default_branch
+
+    existing = worktree_for_branch(source, branch)
+    if existing:
+        open_worktree(
+            source=source,
+            path=existing,
+            workspace_name=workspace_name,
+            branch=branch,
+        )
+        return {
+            "version": 2,
+            "name": f"{workspace_name}/{branch}",
+            "workspace_name": workspace_name,
+            "slug": worktree_manifest_slug(repo, repo_dir_name(branch)),
+            "repos": [],
+        }
+
+    local = branch in local_branches(source)
+    upstream = False if local else remote_branch_exists(source, branch)
+    if upstream:
+        fetch_remote_branch(source, branch)
+        selection: dict[str, str | bool] = {
+            "branch": branch,
+            "start_point": f"origin/{branch}",
+            "create": True,
+            "track": True,
+        }
+    elif local:
+        selection = {
+            "branch": branch,
+            "start_point": branch,
+            "create": False,
+        }
+    else:
+        selection = {
+            "branch": branch,
+            "start_point": f"origin/{default_branch}",
+            "create": True,
+            "no_track": True,
+        }
+
     destination = storage_host.root / workspace_name / branch
     if not path_contains(storage_host.root, destination):
         raise WorkspaceError(
@@ -1794,20 +1931,37 @@ def create_new_worktree(
             f"Worktree folder already exists: {destination}"
         )
 
-    selection["branch"] = branch
     manifest_slug = worktree_manifest_slug(
         repo, repo_dir_name(branch)
     )
-    if manifest_path(manifest_slug).exists():
-        raise WorkspaceError(
-            f"A managed worktree for branch {branch!r} already exists."
+    existing_manifest_path = manifest_path(manifest_slug)
+    if existing_manifest_path.exists():
+        try:
+            existing_manifest = json.loads(
+                existing_manifest_path.read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError) as error:
+            raise WorkspaceError(
+                f"Managed worktree metadata is invalid: {existing_manifest_path}"
+            ) from error
+        existing_repos = existing_manifest.get("repos", [])
+        existing_repo = (
+            existing_repos[0]
+            if isinstance(existing_repos, list)
+            and existing_repos
+            and isinstance(existing_repos[0], dict)
+            else {}
         )
+        if (
+            existing_repo.get("branch") != branch
+            or Path(str(existing_repo.get("path") or "")).resolve()
+            != destination.resolve()
+        ):
+            raise WorkspaceError(
+                f"Managed worktree name conflicts with existing metadata: "
+                f"{existing_manifest_path}"
+            )
     workspace_label = f"{workspace_name}/{branch}"
-
-    signing_key = ""
-    if repo.get("host_key") == "github":
-        require_commands(GPG)
-        signing_key = choose_gpg_signing_key(GITHUB_AUTHOR_EMAIL)
 
     created = False
     try:
@@ -1825,11 +1979,7 @@ def create_new_worktree(
                     "host_key": repo["host_key"],
                     "hostname": repo["hostname"],
                     "full_name": repo["full_name"],
-                    "default_branch": str(
-                        selection.get("default_branch") or repo.get(
-                            "default_branch"
-                        ) or "main"
-                    ),
+                    "default_branch": default_branch,
                     "branch": branch,
                     "source": str(source),
                     "path": str(destination),
@@ -2050,6 +2200,15 @@ def open_worktree(
 ) -> None:
     if not path.is_dir():
         raise WorkspaceError(f"Worktree folder is missing: {path}")
+    if not source.is_dir():
+        raise WorkspaceError(f"Default worktree folder is missing: {source}")
+    if git_output(
+        source, "rev-parse", "--is-bare-repository", check=False
+    ) == "true":
+        raise WorkspaceError(
+            "Herdr requires a checked-out default worktree, not bare Git "
+            f"data: {source}"
+        )
 
     is_linked_worktree = source.resolve() != path.resolve()
     if is_linked_worktree:
