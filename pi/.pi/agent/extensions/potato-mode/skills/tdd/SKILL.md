@@ -1,9 +1,12 @@
 ---
 name: tdd
 description: Test-driven development with red-green-refactor loop. Use when user wants to build features or fix bugs using TDD, mentions "red-green-refactor", wants integration tests, or asks for test-first development.
+disable-model-invocation: true
 ---
 
 # Test-Driven Development
+
+This skill is explicit-only or loaded by the Potato Mode router. Loading it does not expand edit authority. For review-only, no-edit, or no-artifact tasks, return a proposed test sequence without creating files.
 
 ## Philosophy
 

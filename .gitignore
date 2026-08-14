@@ -10,3 +10,5 @@ pi/.pi/agent/sessions/
 nvim/.config/nvim/parser/
 nvim/.config/nvim/lazy-lock.json
 zsh/.zsh_profile
+pi/.pi/agent/run-history.jsonl
+pi/.pi/agent/missions

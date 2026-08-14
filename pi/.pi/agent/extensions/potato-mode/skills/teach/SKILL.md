@@ -7,6 +7,8 @@ argument-hint: "What would you like to learn about?"
 
 The user has asked you to teach them something. This is a stateful request - they intend to learn the topic over multiple sessions.
 
+This skill is explicit-only. Confirm that the current directory is intended to become a teaching workspace and that the user authorizes the files below. Otherwise teach in chat and create no files.
+
 ## Teaching Workspace
 
 Treat the current directory as a teaching workspace. The state of their learning is captured in this directory in several files:
