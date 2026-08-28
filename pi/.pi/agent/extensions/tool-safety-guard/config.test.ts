@@ -17,6 +17,8 @@ test("config applies safe defaults and resolves wildcard rules", () => {
 	assert.equal(config.enabled, true);
 	assert.equal(config.failureMode, "block");
 	assert.equal(config.reviewers.luna.thinkingLevel, "low");
+	assert.match(config.policy, /Allow unless the command presents a concrete, plausible high-risk effect/);
+	assert.match(config.policy, /Missing or truncated context alone does not imply ask/);
 	assert.equal(resolveToolRule(config, "bash")?.reviewer, "luna");
 	assert.equal(resolveToolRule(config, "read"), undefined);
 });

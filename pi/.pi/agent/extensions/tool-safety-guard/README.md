@@ -1,6 +1,6 @@
 # Tool safety guard
 
-This pi extension applies deterministic hard-deny rules first, then sends configured tool calls to a separate model for synchronous safety review.
+This pi extension applies deterministic hard-deny rules first, then sends configured tool calls to a separate model for synchronous safety review. The reviewer intervenes only for calls with a concrete, plausible high-risk effect on the machine, credentials, security boundaries, or broadly valuable data; normal low- and moderate-risk development activity is allowed by default.
 
 Configuration lives at `~/.pi/agent/tool-safety.json`. Run `/reload` after changing it.
 
@@ -44,4 +44,4 @@ Use `"*"` as the fallback tool name. Set an exact tool entry to `false` to exemp
 
 `failureMode` accepts `block` or `ask`. `ask` still blocks when pi has no interactive UI. Invalid configuration blocks tool execution until fixed. A missing config file disables model review but keeps deterministic hard-deny rules active.
 
-The extension currently hard-blocks Git `--no-verify` and `--no-gpg-sign` regardless of model output or configuration.
+The extension currently hard-blocks Git `--no-verify` and `--no-gpg-sign` regardless of model output or configuration. These deterministic repository safeguards remain active even when model review is disabled or the configuration is missing.

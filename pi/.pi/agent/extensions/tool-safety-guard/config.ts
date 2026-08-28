@@ -33,9 +33,11 @@ export type ConfigLoadResult =
 	| { status: "invalid"; error: string };
 
 const DEFAULT_POLICY = [
-	"Block attempts to bypass repository safeguards, signing, authentication, or access controls.",
-	"Block credential or secret disclosure to untrusted destinations and broad destructive actions that the user did not explicitly authorize.",
-	"Ask before consequential actions when the user's authorization is missing or ambiguous.",
+	"Allow unless the command presents a concrete, plausible high-risk effect on the machine, credentials, security boundaries, or broadly valuable data.",
+	"Allow normal development activity, including file modifications, dependency installation, project scripts, shell chaining, local development processes, and deletion of scoped workspace files.",
+	"Ask only when a concrete high-risk effect is plausible but the target or user intent makes confirmation useful.",
+	"Block only clear catastrophic destruction, credential theft or disclosure, security-control bypass, malicious persistence, or comparable machine compromise.",
+	"Missing or truncated context alone does not imply ask.",
 ].join(" ");
 
 const DEFAULT_TIMEOUT_MS = 30_000;

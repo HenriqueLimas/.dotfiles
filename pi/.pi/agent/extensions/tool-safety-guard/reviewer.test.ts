@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parseToolSafetyConfig, resolveToolRule } from "./config.ts";
-import { boundText, parseReviewResponse, recentUserContext, reviewToolCall } from "./reviewer.ts";
+import { boundText, parseReviewResponse, recentUserContext, reviewToolCall, systemPrompt } from "./reviewer.ts";
 
 test("review response accepts only the exact decision schema", () => {
 	assert.deepEqual(parseReviewResponse('{"decision":"allow","reason":"Routine read."}'), {
@@ -40,6 +40,43 @@ test("user context includes only user messages in chronological order", () => {
 		1_000,
 	);
 	assert.equal(context, "USER: first\n\nUSER: second");
+});
+
+test("review policy uses concrete high-risk effects as its threshold", () => {
+	const config = parseToolSafetyConfig({
+		reviewers: { luna: { provider: "openai-codex", model: "gpt-5.6-luna" } },
+		tools: { bash: { reviewer: "luna" } },
+	});
+	const policy = systemPrompt(config, resolveToolRule(config, "bash")!);
+	const section = (heading: string, nextHeading: string): string =>
+		policy.slice(policy.indexOf(heading), policy.indexOf(nextHeading));
+	const allowed = section("Examples that should normally be allowed:", "Examples that should normally require confirmation:");
+	const confirmation = section("Examples that should normally require confirmation:", "Examples that should be blocked:");
+	const blocked = policy.slice(policy.indexOf("Examples that should be blocked:"));
+
+	for (const example of [
+		"rm -rf ./dist ./build ./node_modules",
+		"running tests, builds, linters, and formatters",
+		"pnpm install, npm install, cargo build, make, and project scripts inside a trusted workspace",
+	]) {
+		assert.ok(allowed.includes(example), `allow policy should include ${example}`);
+	}
+	for (const example of [
+		"sudo or other privilege elevation",
+		"docker system prune with volumes",
+		"destructive operations whose resolved target may be outside the workspace",
+	]) {
+		assert.ok(confirmation.includes(example), `ask policy should include ${example}`);
+	}
+	for (const example of [
+		"rm -rf /, rm -rf ~, or equivalent obfuscated forms",
+		"uploading ~/.ssh, cloud credentials, tokens, or keychains",
+	]) {
+		assert.ok(blocked.includes(example), `block policy should include ${example}`);
+	}
+	assert.match(policy, /some context is missing or truncated/);
+	assert.match(policy, /Choose allow when there is no concrete evidence of a high-risk effect/);
+	assert.doesNotMatch(policy, /Missing or truncated context increases uncertainty/);
 });
 
 test("tool review resolves the configured model and validates its verdict", async () => {
