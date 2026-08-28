@@ -17,7 +17,7 @@ import {
 	BORA_STATE_ENTRY,
 	isBoraWorking,
 	latestBoraRun,
-	latestParentUserMessage,
+	latestParentAssistantMessage,
 	markInterruptedBoraRun,
 } from "./state.ts";
 import type { BoraConfig, BoraResultDetails, BoraStatus, PersistedBoraRun } from "./types.ts";
@@ -25,6 +25,10 @@ import type { BoraConfig, BoraResultDetails, BoraStatus, PersistedBoraRun } from
 const RESULT_MESSAGE = "bora-results";
 const HERDR_BACKGROUND_WORK_EVENT = "herdr:background-work";
 const STATUS_KEY = "bora";
+const BORA_CHILD_RESOURCE_POLICY = {
+	...DEFAULT_CHILD_RESOURCE_POLICY,
+	noSkills: false,
+};
 
 interface BoraRun {
 	id: string;
@@ -230,7 +234,7 @@ export default function boraExtension(pi: ExtensionAPI) {
 		});
 	}
 
-	async function createChildForRun(run: BoraRun): Promise<ChildAgentSession> {
+	async function createChildForRun(run: BoraRun, projectTrusted: boolean): Promise<ChildAgentSession> {
 		return createChildAgentSession({
 			cwd: run.cwd,
 			artifactDir: run.artifactDir,
@@ -241,18 +245,19 @@ export default function boraExtension(pi: ExtensionAPI) {
 			thinkingLevel: run.thinkingLevel,
 			tools: IMPLEMENTATION_TOOLS,
 			appendSystemPrompt: BORA_SYSTEM_PROMPT,
-			resourcePolicy: DEFAULT_CHILD_RESOURCE_POLICY,
+			resourcePolicy: BORA_CHILD_RESOURCE_POLICY,
+			projectTrusted,
 		});
 	}
 
-	async function ensureChild(run: BoraRun): Promise<ChildAgentSession> {
+	async function ensureChild(run: BoraRun, projectTrusted: boolean): Promise<ChildAgentSession> {
 		if (run.child) return run.child;
 		if (!run.sessionFile) {
 			throw new Error(`Cannot reopen Bora run ${run.id}: its child session path is missing. Parent state was retained.`);
 		}
 
 		try {
-			const child = await createChildForRun(run);
+			const child = await createChildForRun(run, projectTrusted);
 			if (!alive || currentRun !== run) {
 				child.dispose();
 				throw new Error("The Bora run is no longer active");
@@ -310,7 +315,7 @@ export default function boraExtension(pi: ExtensionAPI) {
 		);
 	}
 
-	async function executeTurn(run: BoraRun, prompt: string): Promise<void> {
+	async function executeTurn(run: BoraRun, prompt: string, projectTrusted: boolean): Promise<void> {
 		if (!alive || currentRun !== run || run.abortRequested) return;
 		run.status = "running";
 		run.error = undefined;
@@ -322,7 +327,7 @@ export default function boraExtension(pi: ExtensionAPI) {
 		updateUi();
 
 		try {
-			const child = await ensureChild(run);
+			const child = await ensureChild(run, projectTrusted);
 			if (!alive || currentRun !== run || run.abortRequested) return;
 			await child.session.prompt(prompt, { expandPromptTemplates: false });
 			if (!alive || currentRun !== run || run.abortRequested) return;
@@ -393,7 +398,8 @@ export default function boraExtension(pi: ExtensionAPI) {
 		};
 
 		// Session creation performs model resolution and auth validation before any prompt starts.
-		const child = await createChildForRun(run);
+		const projectTrusted = ctx.isProjectTrusted();
+		const child = await createChildForRun(run, projectTrusted);
 		if (!child.sessionFile) {
 			child.dispose();
 			throw new Error("Bora child session did not create a persistent JSONL file");
@@ -405,7 +411,7 @@ export default function boraExtension(pi: ExtensionAPI) {
 		beginBackgroundWork(run);
 		persistCurrentRun(run);
 		updateUi();
-		void executeTurn(run, buildInitialTask(task));
+		void executeTurn(run, buildInitialTask(task), projectTrusted);
 		return run;
 	}
 
@@ -418,11 +424,12 @@ export default function boraExtension(pi: ExtensionAPI) {
 
 		// Reopen only on demand after reload/resume. This also gives a useful recovery error
 		// without changing the persisted parent marker when the JSONL is unavailable.
-		await ensureChild(run);
+		const projectTrusted = ctx.isProjectTrusted();
+		await ensureChild(run, projectTrusted);
 		run.abortRequested = false;
 		run.suppressPublication = false;
 		run.uiCleared = false;
-		void executeTurn(run, buildFollowupTask(message));
+		void executeTurn(run, buildFollowupTask(message), projectTrusted);
 		ctx.ui.notify(`Bora follow-up queued for ${run.id}.`, "info");
 	}
 
@@ -607,11 +614,12 @@ export default function boraExtension(pi: ExtensionAPI) {
 						if (!ctx.hasUI) {
 							throw new Error("Provide an explicit follow-up message without UI confirmation");
 						}
-						const parentMessage = latestParentUserMessage(ctx.sessionManager.getBranch());
-						if (!parentMessage) throw new Error("No suitable non-empty parent user message exists for a follow-up");
+						await ctx.waitForIdle();
+						const parentMessage = latestParentAssistantMessage(ctx.sessionManager.getBranch());
+						if (!parentMessage) throw new Error("No suitable non-empty parent assistant response exists for a follow-up");
 						const preview = parentMessage.replace(/\s+/g, " ").slice(0, 240);
 						const confirmed = await ctx.ui.confirm(
-							"Send latest parent feedback to Bora?",
+							"Send latest parent response to Bora?",
 							`${preview}${parentMessage.length > 240 ? "…" : ""}`,
 						);
 						if (!confirmed) {
@@ -624,6 +632,7 @@ export default function boraExtension(pi: ExtensionAPI) {
 					return;
 				}
 
+				if (!stripOuterQuotes(input)) await ctx.waitForIdle();
 				const task = resolveBoraTask(input, ctx.sessionManager.getBranch());
 				const config = await loadBoraConfig();
 				const run = await launch(task, config, ctx);

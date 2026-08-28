@@ -1,5 +1,5 @@
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
-import { latestParentUserMessage } from "./state.ts";
+import { latestParentAssistantMessage } from "./state.ts";
 
 export function stripOuterQuotes(value: string): string {
 	const trimmed = value.trim();
@@ -17,7 +17,7 @@ export function resolveBoraTask(input: string, branch: readonly SessionEntry[]):
 	const explicitTask = stripOuterQuotes(input);
 	if (explicitTask) return explicitTask;
 
-	const parentMessage = latestParentUserMessage(branch);
-	if (!parentMessage) throw new Error("No suitable non-empty parent user message exists for bare /bora");
+	const parentMessage = latestParentAssistantMessage(branch);
+	if (!parentMessage) throw new Error("No suitable non-empty parent assistant response exists for bare /bora");
 	return parentMessage;
 }

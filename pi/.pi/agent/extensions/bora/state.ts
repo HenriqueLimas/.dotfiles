@@ -51,9 +51,8 @@ export function latestBoraRun(entries: readonly SessionEntry[]): PersistedBoraRu
 	return isPersistedBoraRun(marker.data) ? marker.data : undefined;
 }
 
-function textFromUser(message: AgentMessage): string {
-	if (message.role !== "user") return "";
-	if (typeof message.content === "string") return message.content.trim();
+function textFromAssistant(message: AgentMessage): string {
+	if (message.role !== "assistant") return "";
 	return message.content
 		.filter((part): part is { type: "text"; text: string } => part.type === "text")
 		.map((part) => part.text)
@@ -61,10 +60,10 @@ function textFromUser(message: AgentMessage): string {
 		.trim();
 }
 
-export function latestParentUserMessage(entries: readonly SessionEntry[]): string | undefined {
+export function latestParentAssistantMessage(entries: readonly SessionEntry[]): string | undefined {
 	for (const entry of [...entries].reverse()) {
-		if (entry.type !== "message" || entry.message.role !== "user") continue;
-		const text = textFromUser(entry.message);
+		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+		const text = textFromAssistant(entry.message);
 		if (text) return text;
 	}
 	return undefined;

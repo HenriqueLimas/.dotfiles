@@ -12,18 +12,37 @@ function userEntry(content: unknown, id: string) {
 	} as never;
 }
 
-test("bare /bora uses the latest non-empty parent user message", () => {
-	const branch = [userEntry("older task", "old"), userEntry("  ", "empty"), userEntry("latest task", "latest")];
+function assistantEntry(content: unknown, id: string) {
+	return {
+		type: "message",
+		id,
+		parentId: null,
+		timestamp: "2026-01-01T00:00:00.000Z",
+		message: { role: "assistant", content, timestamp: Date.now() },
+	} as never;
+}
 
-	assert.equal(resolveBoraTask("", branch), "latest task");
+test("bare /bora uses the latest non-empty assistant response", () => {
+	const branch = [assistantEntry([{ type: "text", text: "implementation plan" }], "assistant")];
+
+	assert.equal(resolveBoraTask("", branch), "implementation plan");
 });
 
-test("explicit /bora task takes precedence over the parent user message", () => {
-	const branch = [userEntry("implicit task", "parent")];
+test("a newer user message does not become the bare /bora task", () => {
+	const branch = [assistantEntry([{ type: "text", text: "implementation plan" }], "assistant"), userEntry("thanks", "user")];
+
+	assert.equal(resolveBoraTask("", branch), "implementation plan");
+});
+
+test("explicit /bora task takes precedence over the assistant response", () => {
+	const branch = [assistantEntry([{ type: "text", text: "implicit task" }], "assistant")];
 
 	assert.equal(resolveBoraTask(' "explicit task" ', branch), "explicit task");
 });
 
-test("bare /bora fails when no suitable parent user message exists", () => {
-	assert.throws(() => resolveBoraTask("  ", []), /No suitable non-empty parent user message exists for bare \/bora/);
+test("bare /bora fails when no assistant response exists", () => {
+	assert.throws(
+		() => resolveBoraTask("  ", [userEntry("request", "user")]),
+		/No suitable non-empty parent assistant response exists for bare \/bora/,
+	);
 });

@@ -14,7 +14,7 @@
 /bora config
 ```
 
-Bare `/bora` delegates the latest non-empty user message from the active parent-session branch as the implementation task. The command itself authorizes delegation, so no confirmation is requested. If no suitable message exists, Bora reports an error. An explicit `/bora <task>` always uses the provided task.
+Bare `/bora` delegates the latest non-empty assistant response from the active parent-session branch as the implementation task. The command itself authorizes delegation, so no confirmation is requested. If no suitable assistant response exists, Bora reports an error. An explicit `/bora <task>` always uses the provided task.
 
 The first command creates one child JSONL session under:
 
@@ -22,7 +22,7 @@ The first command creates one child JSONL session under:
 ~/.pi/agent/bora-sessions/<parent-session-id>/<run-id>/
 ```
 
-Follow-ups reuse that child session, including after `/reload` or resuming the parent session once the previous child turn has settled. `/bora followup` without a message selects the latest non-empty parent user message, but only after TUI confirmation; use an explicit message in headless modes.
+Follow-ups reuse that child session, including after `/reload` or resuming the parent session once the previous child turn has settled. `/bora followup` without a message selects the latest non-empty assistant response, but only after TUI confirmation; use an explicit message in headless modes. Explicit tasks and follow-ups always win.
 
 `/bora status` shows the run, child session path, artifact directory, and bounded latest output. `/bora abort` stops active work without deleting the child JSONL session. `/bora config` reports the resolved configuration path and values.
 
@@ -40,4 +40,4 @@ Edit `~/.pi/agent/bora.json`:
 
 All keys are optional. The defaults are Luna, the model's default thinking level, and `30000` result characters. Unknown keys and invalid values are rejected. Configuration is read for each new run; a follow-up keeps the model, thinking level, and result limit captured by its existing run.
 
-Bora does not load extensions, skills, prompt templates, or themes in the child session. It does load global and repository context files so the child follows the same engineering and repository instructions without exposing parent extension commands.
+Bora loads global and trusted-project skills along with global and repository context files. Skills remain progressively disclosed: the child sees their names and descriptions, then reads the matching `SKILL.md` when needed. Extensions, prompt templates, and themes remain disabled, so the child cannot invoke parent extension commands.

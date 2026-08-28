@@ -8,6 +8,7 @@ import {
 	ModelRuntime,
 	resolveCliModel,
 	SessionManager,
+	SettingsManager,
 	type AgentSessionEvent,
 	type AgentSessionEventListener,
 	type CreateAgentSessionOptions,
@@ -43,6 +44,8 @@ export interface ChildSessionRequest {
 	tools: readonly string[];
 	appendSystemPrompt: string | readonly string[];
 	resourcePolicy: ChildResourcePolicy;
+	/** Parent trust state for project-local resources. Omitted by legacy callers. */
+	projectTrusted?: boolean;
 	/** Bora requires a durable prior file; `/team` preserves its historical reopen behavior. */
 	requireExistingSessionFile?: boolean;
 	/** Injectable for characterization tests and callers that already own a runtime. */
@@ -171,9 +174,13 @@ export async function createChildAgentSession(request: ChildSessionRequest): Pro
 			? [request.appendSystemPrompt]
 			: [...request.appendSystemPrompt];
 	const policy = request.resourcePolicy;
+	const settingsManager = SettingsManager.create(request.cwd, getAgentDir(), {
+		projectTrusted: request.projectTrusted,
+	});
 	const resourceLoader = new DefaultResourceLoader({
 		cwd: request.cwd,
 		agentDir: getAgentDir(),
+		settingsManager,
 		noExtensions: policy.noExtensions,
 		noSkills: policy.noSkills,
 		noPromptTemplates: policy.noPromptTemplates,

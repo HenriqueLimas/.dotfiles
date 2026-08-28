@@ -5,7 +5,7 @@ import {
 	isBoraWorking,
 	isPersistedBoraRun,
 	latestBoraRun,
-	latestParentUserMessage,
+	latestParentAssistantMessage,
 	markInterruptedBoraRun,
 } from "./state.ts";
 import type { PersistedBoraRun } from "./types.ts";
@@ -45,6 +45,16 @@ function userEntry(content: unknown, id = "user-1") {
 	} as never;
 }
 
+function assistantEntry(content: unknown, id = "assistant-1") {
+	return {
+		type: "message",
+		id,
+		parentId: null,
+		timestamp: "2026-01-01T00:00:00.000Z",
+		message: { role: "assistant", content, timestamp: Date.now() },
+	} as never;
+}
+
 test("persisted Bora state is validated", () => {
 	assert.equal(isPersistedBoraRun(run), true);
 	assert.equal(isPersistedBoraRun({ ...run, version: 2 }), false);
@@ -67,22 +77,51 @@ test("running state is restored as aborted after interruption", () => {
 	assert.equal(markInterruptedBoraRun(run).status, "completed");
 });
 
-test("latest non-empty parent user message ignores empty and assistant entries", () => {
+test("latest non-empty assistant response ignores newer user messages", () => {
 	const entries = [
-		userEntry("first", "first"),
-		{
-			type: "message",
-			id: "assistant",
-			parentId: "first",
-			timestamp: "2026-01-01T00:00:01.000Z",
-			message: { role: "assistant", content: [{ type: "text", text: "reply" }], timestamp: Date.now() },
-		},
-		userEntry("   ", "empty"),
-		userEntry([{ type: "text", text: "latest feedback" }], "latest"),
+		userEntry("older request"),
+		assistantEntry([{ type: "text", text: "implementation plan" }]),
+		userEntry("thanks"),
+	];
+
+	assert.equal(latestParentAssistantMessage(entries), "implementation plan");
+});
+
+test("empty, tool-call-only, and thinking-only assistant messages are skipped", () => {
+	const entries = [
+		assistantEntry([{ type: "text", text: "usable response" }], "usable"),
+		assistantEntry([{ type: "text", text: "   " }], "empty"),
+		assistantEntry([{ type: "toolCall", name: "edit" }], "tool-only"),
+		assistantEntry([{ type: "thinking", thinking: "internal reasoning" }], "thinking-only"),
 	] as never[];
 
-	assert.equal(latestParentUserMessage(entries), "latest feedback");
-	assert.equal(latestParentUserMessage([userEntry("  ")]), undefined);
+	assert.equal(latestParentAssistantMessage(entries), "usable response");
+	assert.equal(latestParentAssistantMessage([assistantEntry([])]), undefined);
+});
+
+test("mixed assistant content returns text blocks in order", () => {
+	const entries = [
+		assistantEntry([
+			{ type: "thinking", thinking: "internal reasoning" },
+			{ type: "text", text: "first part" },
+			{ type: "toolCall", name: "read" },
+			{ type: "text", text: "second part" },
+		]),
+	] as never[];
+
+	assert.equal(latestParentAssistantMessage(entries), "first part\nsecond part");
+});
+
+test("only the supplied active branch is inspected", () => {
+	const inactiveBranch = [assistantEntry([{ type: "text", text: "inactive response" }]), userEntry("inactive user")];
+	const activeBranch = [assistantEntry([{ type: "text", text: "active response" }])];
+
+	assert.equal(latestParentAssistantMessage(activeBranch), "active response");
+	assert.notEqual(latestParentAssistantMessage(activeBranch), latestParentAssistantMessage(inactiveBranch));
+});
+
+test("no suitable assistant response returns undefined", () => {
+	assert.equal(latestParentAssistantMessage([userEntry("request")]), undefined);
 });
 
 test("only running state counts as active work", () => {
