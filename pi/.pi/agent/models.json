@@ -15,6 +15,25 @@
           }
         }
       ]
+    },
+    "ollama": {
+      "api": "openai-completions",
+      "apiKey": "ollama",
+      "baseUrl": "http://localhost:11434/v1",
+      "compat": {
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": true
+      },
+      "models": [
+        {
+          "id": "qwen3.8:27b",
+          "name": "Qwen 3.8 27B (Local)",
+          "contextWindow": 128000,
+          "input": ["text", "image"],
+          "maxTokens": 16384,
+          "reasoning": true
+        }
+      ]
     }
   }
 }

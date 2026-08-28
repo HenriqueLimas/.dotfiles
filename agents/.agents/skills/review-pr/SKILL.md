@@ -1,6 +1,7 @@
 ---
 name: review-pr
-description: Review a GitHub Pull Request for bugs ranked by critical/high/medium/low severity. Performs multi-pass analysis, rules out false positives through research, and writes a final report. Use when the user invokes /review-pr or asks to review a PR.
+description: Review a GitHub Pull Request for bugs ranked by critical/high/medium/low severity. Performs multi-pass analysis, rules out false positives through research, and writes a final report. Use when the user explicitly invokes the skill.
+disable-model-invocation: true
 ---
 
 # Review PR (`/review-pr #{PR number or URL}`)

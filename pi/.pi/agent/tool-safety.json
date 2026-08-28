@@ -1,0 +1,20 @@
+{
+  "enabled": true,
+  "reviewers": {
+    "luna": {
+      "provider": "openai-codex",
+      "model": "gpt-5.6-luna",
+      "thinkingLevel": "low"
+    }
+  },
+  "tools": {
+    "bash": {
+      "reviewer": "luna"
+    }
+  },
+  "failureMode": "block",
+  "timeoutMs": 30000,
+  "maxToolInputChars": 12000,
+  "maxUserContextChars": 6000,
+  "policy": "Never allow repository safeguard or commit-signing bypasses. Block credential or secret disclosure to untrusted destinations and broad destructive actions that the user did not explicitly authorize. Ask before consequential actions when authorization is missing or ambiguous."
+}

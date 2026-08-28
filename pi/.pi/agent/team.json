@@ -1,0 +1,37 @@
+{
+  "models": [
+    {
+      "name": "architect",
+      "model": "openai-codex/gpt-5.6-sol",
+      "thinkingLevel": "high",
+      "perspective": "Focus on architecture, boundaries, long-term maintainability, and compatibility with existing behavior."
+    },
+    {
+      "name": "reviewer",
+      "model": "openai-codex/gpt-5.6-sol",
+      "thinkingLevel": "high",
+      "perspective": "Focus on correctness, hidden failure modes, security, and missing tests."
+    },
+    {
+      "name": "skeptic",
+      "model": "github-copilot/grok-4.6",
+      "thinkingLevel": "high",
+      "perspective": "Challenge assumptions, look for simpler alternatives, and identify operational or product risks others may miss."
+    }
+  ],
+  "maxConcurrency": 3,
+  "autoSynthesize": true,
+  "maxResultChars": 30000,
+  "collaboration": {
+    "brainstorm": {
+      "mode": "roundtable",
+      "rounds": 2,
+      "maxTranscriptChars": 30000
+    },
+    "review": {
+      "mode": "independent",
+      "rounds": 1,
+      "maxTranscriptChars": 30000
+    }
+  }
+}
