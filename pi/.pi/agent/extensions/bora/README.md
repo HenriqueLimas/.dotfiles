@@ -24,7 +24,7 @@ The first command creates one child JSONL session under:
 
 Follow-ups reuse that child session, including after `/reload` or resuming the parent session once the previous child turn has settled. `/bora followup` without a message selects the latest non-empty assistant response, but only after TUI confirmation; use an explicit message in headless modes. Explicit tasks and follow-ups always win.
 
-`/bora status` shows the run, child session path, artifact directory, and bounded latest output. `/bora abort` stops active work without deleting the child JSONL session. `/bora config` reports the resolved configuration path and values.
+`/bora status` opens a live, bordered view of the run, child session path, artifact directory, activity log, and bounded latest output. Use Ctrl+U and Ctrl+D to scroll the activity and output pane by eight lines at a time. Page Up and Page Down remain available as alternatives. `/bora abort` stops active work without deleting the child JSONL session. `/bora config` reports the resolved configuration path and values.
 
 ## Configuration
 

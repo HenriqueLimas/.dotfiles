@@ -19,7 +19,7 @@
 /team config
 ```
 
-`/team status` opens a live overlay. Use up/down to select a panelist, Page Up/Page Down to scroll its logs, and Escape to close it. While agents are queued or running, an animated widget stays below the editor and the footer reports active, queued, and completed worker counts.
+`/team status` opens a live overlay. Use up/down to select a panelist, Ctrl+U/Ctrl+D to scroll its logs by eight lines, Page Up/Page Down as alternatives, and Escape to close it. While agents are queued or running, an animated widget stays below the editor and the footer reports active, queued, and completed worker counts.
 
 For `review plan` with no argument, the extension reviews the latest assistant response in the parent session. A path may also be supplied as the plan text; panelists can read it from the project.
 

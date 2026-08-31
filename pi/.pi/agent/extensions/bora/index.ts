@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { chmod, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { matchesKey, Text, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { Text } from "@earendil-works/pi-tui";
 import {
 	ChildAgentSession,
 	classifyTerminalResult,
@@ -12,6 +12,7 @@ import {
 } from "../_shared/agent-session.ts";
 import { DEFAULT_BORA_MAX_RESULT_CHARS, getBoraConfigPath, loadBoraConfig } from "./config.ts";
 import { BORA_SYSTEM_PROMPT, buildFollowupTask, buildInitialTask } from "./prompts.ts";
+import { BoraStatusPopup } from "./status-popup.ts";
 import { resolveBoraTask, stripOuterQuotes } from "./command.ts";
 import {
 	BORA_STATE_ENTRY,
@@ -29,6 +30,7 @@ const BORA_CHILD_RESOURCE_POLICY = {
 	...DEFAULT_CHILD_RESOURCE_POLICY,
 	noSkills: false,
 };
+const MAX_LOG_LINES = 200;
 
 interface BoraRun {
 	id: string;
@@ -43,6 +45,7 @@ interface BoraRun {
 	maxResultChars: number;
 	status: BoraStatus;
 	error?: string;
+	logs: string[];
 	output: string;
 	streamingText: string;
 	phase?: string;
@@ -88,6 +91,21 @@ function capOutput(output: string, maxChars: number): string {
 	return output.length > maxChars ? output.slice(0, maxChars) : output;
 }
 
+function appendLog(run: BoraRun, line: string): void {
+	run.logs.push(`[${new Date().toLocaleTimeString()}] ${line}`);
+	if (run.logs.length > MAX_LOG_LINES) run.logs.splice(0, run.logs.length - MAX_LOG_LINES);
+}
+
+function safeJson(value: unknown): string {
+	try {
+		const text = JSON.stringify(value);
+		if (typeof text !== "string") return "(no arguments)";
+		return text.length > 160 ? `${text.slice(0, 160)}...` : text;
+	} catch {
+		return "(unserializable arguments)";
+	}
+}
+
 function persisted(run: BoraRun): PersistedBoraRun {
 	return {
 		version: 1,
@@ -106,7 +124,7 @@ function persisted(run: BoraRun): PersistedBoraRun {
 	};
 }
 
-function runFromPersisted(data: PersistedBoraRun): BoraRun {
+function runFromPersisted(data: PersistedBoraRun, interrupted = false): BoraRun {
 	return {
 		id: data.id,
 		task: data.task,
@@ -119,6 +137,7 @@ function runFromPersisted(data: PersistedBoraRun): BoraRun {
 		maxResultChars: data.maxResultChars ?? DEFAULT_BORA_MAX_RESULT_CHARS,
 		status: data.status,
 		error: data.error,
+		logs: interrupted ? ["restored after interruption"] : [],
 		output: data.latestOutput ?? "",
 		streamingText: "",
 		abortRequested: false,
@@ -215,6 +234,7 @@ export default function boraExtension(pi: ExtensionAPI) {
 			if (event.type === "agent_start") {
 				run.streamingText = "";
 				run.phase = "thinking";
+				appendLog(run, "agent started");
 			} else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
 				run.streamingText += event.assistantMessageEvent.delta;
 				if (run.streamingText.length > run.maxResultChars) {
@@ -225,10 +245,13 @@ export default function boraExtension(pi: ExtensionAPI) {
 				return;
 			} else if (event.type === "tool_execution_start") {
 				run.phase = event.toolName;
+				appendLog(run, `tool ${event.toolName} started ${safeJson(event.args)}`);
 			} else if (event.type === "tool_execution_end") {
 				run.phase = `${event.toolName} ${event.isError ? "failed" : "completed"}`;
+				appendLog(run, `tool ${event.toolName} ${event.isError ? "failed" : "completed"}`);
 			} else if (event.type === "auto_retry_start") {
 				run.phase = `retry ${event.attempt}/${event.maxAttempts}`;
+				appendLog(run, `retry ${event.attempt}/${event.maxAttempts}: ${event.errorMessage}`);
 			}
 			updateUi();
 		});
@@ -279,6 +302,7 @@ export default function boraExtension(pi: ExtensionAPI) {
 		run.suppressPublication ||= options.suppressPublication;
 		run.status = "aborted";
 		run.error = options.reason;
+		appendLog(run, `aborted: ${options.reason}`);
 		run.phase = undefined;
 		run.uiCleared = options.clearUi;
 		persistCurrentRun(run);
@@ -322,6 +346,7 @@ export default function boraExtension(pi: ExtensionAPI) {
 		run.streamingText = "";
 		run.phase = "starting";
 		run.uiCleared = false;
+		appendLog(run, "starting");
 		beginBackgroundWork(run);
 		persistCurrentRun(run);
 		updateUi();
@@ -337,11 +362,13 @@ export default function boraExtension(pi: ExtensionAPI) {
 			run.streamingText = "";
 			run.status = result.status;
 			run.error = result.error;
+			appendLog(run, result.status === "completed" ? "completed" : `${result.status}: ${result.error ?? "no details"}`);
 		} catch (error) {
 			if (!alive || currentRun !== run) return;
 			if (!run.abortRequested) {
 				run.status = "failed";
 				run.error = formatError(error);
+				appendLog(run, `failed: ${run.error}`);
 			}
 			run.streamingText = "";
 		} finally {
@@ -390,6 +417,7 @@ export default function boraExtension(pi: ExtensionAPI) {
 			thinkingLevel: config.thinkingLevel,
 			maxResultChars: config.maxResultChars,
 			status: "running",
+			logs: [],
 			output: "",
 			streamingText: "",
 			abortRequested: false,
@@ -458,24 +486,34 @@ export default function boraExtension(pi: ExtensionAPI) {
 
 		await ctx.ui.custom<void>(
 			(tui, theme, _keybindings, done) => {
+				const popup = new BoraStatusPopup(
+					theme,
+					() => {
+						const run = currentRun;
+						if (!run) return undefined;
+						return {
+							id: run.id,
+							status: run.status,
+							model: run.resolvedModel ?? run.model,
+							task: run.task,
+							sessionFile: run.sessionFile,
+							artifactDir: run.artifactDir,
+							logs: [...run.logs],
+							streamingText: run.streamingText,
+							output: run.output,
+							error: run.error,
+						};
+					},
+					done,
+				);
 				const refresh = () => tui.requestRender();
 				overlayRefreshes.add(refresh);
 				return {
-					render: (width: number) => {
-						const run = currentRun;
-						if (!run) return [];
-						const heading = theme.fg("accent", theme.bold(`Bora ${run.status} · ${run.id}`));
-						const body = statusText(run).split("\n").slice(1);
-						const lines = [heading, ...body];
-						return lines.flatMap((line) =>
-							wrapTextWithAnsi(line, Math.max(1, width - 2)).map((wrapped) => truncateToWidth(` ${wrapped}`, width)),
-						);
-					},
+					render: (width: number) => popup.render(width),
 					handleInput: (data: string) => {
-						if (matchesKey(data, "escape") || data === "q") done();
-						return true;
+						if (popup.handleInput(data)) tui.requestRender();
 					},
-					invalidate: () => {},
+					invalidate: () => popup.invalidate(),
 					dispose: () => overlayRefreshes.delete(refresh),
 				};
 			},
@@ -496,7 +534,7 @@ export default function boraExtension(pi: ExtensionAPI) {
 		}
 
 		const restored = markInterruptedBoraRun(data);
-		currentRun = runFromPersisted(restored);
+		currentRun = runFromPersisted(restored, data.status === "running");
 		if (restored.status !== data.status) pi.appendEntry(BORA_STATE_ENTRY, restored);
 		updateUi();
 	}
