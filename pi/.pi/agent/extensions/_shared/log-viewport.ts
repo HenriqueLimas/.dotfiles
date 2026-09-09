@@ -38,22 +38,42 @@ export class LogViewport {
 		this.clamp();
 	}
 
-	pageUp(): boolean {
+	scrollUp(lines = 1): boolean {
 		const before = this.offsetFromBottom;
-		this.offsetFromBottom += LOG_VIEWPORT_PAGE_SIZE;
+		this.offsetFromBottom += Math.max(1, Math.floor(lines));
 		this.clamp();
 		return this.offsetFromBottom !== before;
 	}
 
-	pageDown(): boolean {
+	scrollDown(lines = 1): boolean {
 		const before = this.offsetFromBottom;
-		this.offsetFromBottom -= LOG_VIEWPORT_PAGE_SIZE;
+		this.offsetFromBottom -= Math.max(1, Math.floor(lines));
 		this.clamp();
+		return this.offsetFromBottom !== before;
+	}
+
+	pageUp(lines = LOG_VIEWPORT_PAGE_SIZE): boolean {
+		return this.scrollUp(lines);
+	}
+
+	pageDown(lines = LOG_VIEWPORT_PAGE_SIZE): boolean {
+		return this.scrollDown(lines);
+	}
+
+	scrollToTop(): boolean {
+		const before = this.offsetFromBottom;
+		this.offsetFromBottom = Math.max(0, this.totalLines - this.viewportLines);
+		return this.offsetFromBottom !== before;
+	}
+
+	scrollToBottom(): boolean {
+		const before = this.offsetFromBottom;
+		this.offsetFromBottom = 0;
 		return this.offsetFromBottom !== before;
 	}
 
 	reset(): void {
-		this.offsetFromBottom = 0;
+		this.scrollToBottom();
 	}
 
 	getOffsetFromBottom(): number {

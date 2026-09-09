@@ -67,6 +67,18 @@ test("new lines do not displace the viewed region while scrolled up", () => {
 	assert.equal(viewport.range().hasBelow, true);
 });
 
+test("start and end navigation jump across the full content", () => {
+	const viewport = new LogViewport();
+	viewport.setContent(40, 12);
+
+	assert.equal(viewport.scrollToTop(), true);
+	assert.deepEqual(lines(viewport), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+	assert.equal(viewport.scrollToTop(), false);
+	assert.equal(viewport.scrollToBottom(), true);
+	assert.deepEqual(lines(viewport), [29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40]);
+	assert.equal(viewport.scrollToBottom(), false);
+});
+
 test("reset returns to the newest content", () => {
 	const viewport = new LogViewport();
 	viewport.setContent(40, 12);

@@ -2,30 +2,97 @@
   "models": [
     {
       "name": "architect",
-      "model": "openai-codex/gpt-5.6-sol",
+      "model": "github-copilot/gpt-6-astra",
       "thinkingLevel": "high",
-      "perspective": "Focus on architecture, boundaries, long-term maintainability, and compatibility with existing behavior."
+      "perspective": "Focus on architecture, system boundaries, interfaces, scalability, long-term maintainability, backward compatibility, and how the solution fits the existing system."
+    },
+    {
+      "name": "domain-engineer",
+      "model": "github-copilot/gpt-5.6-sol",
+      "thinkingLevel": "high",
+      "perspective": "Think like an engineer who deeply understands the existing codebase and domain. Identify implicit assumptions, existing conventions, technical constraints, technical debt, and implementation realities."
+    },
+    {
+      "name": "outsider",
+      "model": "github-copilot/grok-4.6",
+      "thinkingLevel": "high",
+      "perspective": "Approach the problem with fresh eyes and minimal attachment to the current design. Question inherited assumptions, generate unconventional alternatives, and consider what we would build from scratch."
     },
     {
       "name": "reviewer",
-      "model": "openai-codex/gpt-5.6-sol",
+      "model": "github-copilot/claude-opus-5",
       "thinkingLevel": "high",
-      "perspective": "Focus on correctness, hidden failure modes, security, and missing tests."
+      "perspective": "Try to break the proposed solutions. Focus on correctness, hidden failure modes, security, concurrency, data integrity, edge cases, missing tests, and subtle contradictions."
     },
     {
-      "name": "skeptic",
-      "model": "github-copilot/grok-4.6",
+      "name": "product",
+      "model": "github-copilot/gpt-5.6-terra",
       "thinkingLevel": "high",
-      "perspective": "Challenge assumptions, look for simpler alternatives, and identify operational or product risks others may miss."
+      "perspective": "Focus on whether we are solving the right problem. Evaluate user value, requirements, simplicity, product tradeoffs, and whether the proposed complexity is justified."
+    },
+    {
+      "name": "operator",
+      "model": "github-copilot/gpt-5.6-luna",
+      "thinkingLevel": "max",
+      "perspective": "Think like the engineer who will run this in production. Focus on reliability, observability, performance, deployments, migrations, rollback, incident scenarios, and operational cost."
     }
   ],
-  "maxConcurrency": 3,
-  "autoSynthesize": true,
+  "reviewModels": [
+    {
+      "name": "domain-expert",
+      "model": "github-copilot/gpt-6-astra",
+      "thinkingLevel": "high",
+      "perspective": "Focus on whether the change is correct in the context of the existing codebase and domain. Understand surrounding code, invariants, established patterns, implicit assumptions, interactions with callers and dependencies, backward compatibility, and whether the implementation fits how this system actually works."
+    },
+    {
+      "name": "correctness",
+      "model": "github-copilot/claude-opus-5",
+      "thinkingLevel": "high",
+      "perspective": "Act as an adversarial bug hunter. Focus on incorrect behavior, edge cases, error handling, state transitions, concurrency, race conditions, partial failures, data integrity, resource leaks, boundary conditions, and missing or insufficient tests. Assume there may be a bug and try to find a concrete way it could fail."
+    },
+    {
+      "name": "design",
+      "model": "github-copilot/gpt-5.6-sol",
+      "thinkingLevel": "high",
+      "perspective": "Focus on design and long-term maintainability. Evaluate responsibilities, coupling, cohesion, abstractions, interfaces, dependency direction, complexity, duplication, extensibility, consistency with the existing architecture, and whether a materially simpler design would be better. Avoid theoretical future-proofing and subjective style preferences."
+    },
+    {
+      "name": "fresh-eyes",
+      "model": "github-copilot/grok-4.6",
+      "thinkingLevel": "high",
+      "perspective": "Review the change like a competent engineer encountering this part of the codebase for the first time. Focus on unclear intent, surprising behavior, hidden assumptions, cognitive complexity, misleading naming, difficult control flow, confusing APIs, and whether the code and tests communicate their intent without requiring the author's mental model."
+    },
+    {
+      "name": "security",
+      "model": "github-copilot/gpt-6-astra",
+      "thinkingLevel": "max",
+      "perspective": "Focus on security risks introduced by the change, including authentication, authorization, trust boundaries, untrusted input, injection, secrets, sensitive data, cryptography, privilege escalation, unsafe deserialization, and security regressions. Only raise issues supported by a realistic attack or failure path."
+    },
+    {
+      "name": "reliability",
+      "model": "github-copilot/claude-sonnet-5",
+      "thinkingLevel": "high",
+      "perspective": "Review the change from the perspective of the engineer operating the system in production. Focus on failure recovery, retries, idempotency, timeouts, observability, deployment safety, rollback, migrations, resource exhaustion, distributed-system failure modes, and realistic incident scenarios."
+    },
+    {
+      "name": "performance",
+      "model": "github-copilot/claude-opus-5",
+      "thinkingLevel": "high",
+      "perspective": "Focus on material performance and scalability risks. Examine algorithmic complexity, database queries, N+1 behavior, memory usage, CPU usage, network calls, serialization, caching, contention, and behavior with realistic or large workloads. Avoid speculative micro-optimizations."
+    },
+    {
+      "name": "api-compatibility",
+      "model": "github-copilot/gpt-5.6-terra",
+      "thinkingLevel": "high",
+      "perspective": "Focus on accidental changes to externally observable behavior and compatibility contracts, including public APIs, schemas, serialization formats, database schemas, events, CLI behavior, configuration, and backwards compatibility. Identify migration or coordination requirements when they are concretely needed."
+    }
+  ],
+  "maxConcurrency": 6,
   "maxResultChars": 30000,
   "collaboration": {
     "brainstorm": {
       "mode": "roundtable",
-      "rounds": 2,
+      "rounds": 3,
       "maxTranscriptChars": 30000
     },
     "review": {

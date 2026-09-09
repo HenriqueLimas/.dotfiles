@@ -1,6 +1,6 @@
 # Team extension
 
-`/team` runs a panel of pi agents. Each panelist uses its own model and persistent session. Panels can answer independently or use bounded roundtable rounds where members critique their peers before the parent session synthesizes their final positions.
+`/team` runs a panel of pi agents. Each panelist uses its own model and persistent session. Panels can answer independently or use bounded roundtable rounds where members critique their peers before the parent session synthesizes their final positions. PR reviews use a separate roster when `reviewModels` is configured. The four default reviewers work independently, relevant specialists are selected from the changed files and patch, and the parent agent merges their findings into the final review.
 
 ## Commands
 
@@ -19,7 +19,11 @@
 /team config
 ```
 
-`/team status` opens a live overlay. Use up/down to select a panelist, Ctrl+U/Ctrl+D to scroll its logs by eight lines, Page Up/Page Down as alternatives, and Escape to close it. While agents are queued or running, an animated widget stays below the editor and the footer reports active, queued, and completed worker counts.
+`/team status` opens a near-fullscreen live overlay. The initial input stays above a single horizontal agent tab row. Use Left/Right to switch tabs, Up/Down to scroll the selected transcript one line, Option+Up/Option+Down or Page Up/Page Down to jump by a full visible page, Option+Left/Option+Right to jump to the beginning or end, Ctrl+O to expand or collapse the input, and Escape to close. The latest working agent is selected and placed first when the overlay opens. `▶` marks the agent producing the latest activity, while `●`, `…`, `✓`, and `×` distinguish working, queued, completed, and failed agents.
+
+Each tab renders the durable child-session transcript rather than a separate summary buffer. Previous rounds, prompts, assistant text, exposed thinking blocks, tool calls, tool results, retries, errors, and the current streaming message remain inspectable after completion and after restoring the parent session. Providers may keep private reasoning hidden; the overlay can only show thinking content delivered to pi. The collaboration row describes the real coordinator flow. Roundtable peer responses are broadcast to all successful participants between rounds, so completion order is nondeterministic rather than a sequential handoff.
+
+While agents are queued or running, an animated widget stays below the editor and the footer reports active, queued, and completed worker counts.
 
 For `review plan` with no argument, the extension reviews the latest assistant response in the parent session. A path may also be supplied as the plan text; panelists can read it from the project.
 
@@ -37,8 +41,15 @@ Edit `~/.pi/agent/team.json` and run another `/team` command. The extension read
       "perspective": "Focus on architecture and compatibility."
     }
   ],
+  "reviewModels": [
+    {
+      "name": "domain-expert",
+      "model": "openai-codex/gpt-5.6-sol",
+      "thinkingLevel": "high",
+      "perspective": "Focus on the change in the context of the existing codebase and domain."
+    }
+  ],
   "maxConcurrency": 3,
-  "autoSynthesize": true,
   "maxResultChars": 30000,
   "collaboration": {
     "brainstorm": {
@@ -55,9 +66,9 @@ Edit `~/.pi/agent/team.json` and run another `/team` command. The extension read
 }
 ```
 
-Model references use pi's `provider/model` syntax and may include a thinking suffix. Each member name must be unique.
+Model references use pi's `provider/model` syntax and may include a thinking suffix. Each member name must be unique. `reviewModels` uses the same member object shape as `models`. Its standard roster contains `domain-expert`, `correctness`, `design`, `fresh-eyes`, `security`, `reliability`, `performance`, and `api-compatibility`. The first four are always selected, and the four specialists run only when the changed paths or patch indicate that their area is relevant. The parent always synthesizes the reviewer responses. If `reviewModels` is omitted, reviews retain the legacy `models` roster.
 
-When `autoSynthesize` is true, the extension sends the collected responses to the parent agent and starts a synthesis turn. The moderator explicitly loads the global `unslop` skill and applies it to the final synthesis while preserving the panel's technical meaning. Set `autoSynthesize` to false to keep the panel output in the transcript without triggering the parent model.
+After every panel round, the extension sends the raw responses to the parent agent and starts a synthesis turn. PR review uses a dedicated parent prompt that validates findings against the PR-head checkout, merges duplicates, resolves disagreements, filters severity and confidence, and returns the final review. Raw responses remain inspectable, but they are never delivered as the final review. The parent explicitly loads the global `unslop` skill and applies it while preserving the panel's technical meaning.
 
 Collaboration is configured separately for `brainstorm` and `review`; either entry defaults to `independent` when omitted. A leading `--roundtable` or `--independent` command option overrides that command's configured default. Switching an independent command to roundtable uses two rounds and retains its configured transcript limit.
 
@@ -65,13 +76,13 @@ For `roundtable` mode, `rounds` is the total number of child turns per successfu
 
 The previous single collaboration object remains valid and applies the same policy to both commands.
 
-Manual `/team followup` commands remain a single targeted round. They do not recursively start another roundtable. A three-member, two-round panel makes six child model turns before optional parent synthesis, so increasing the round count directly increases cost and latency.
+Manual `/team followup` commands remain a single targeted round. They do not recursively start another roundtable. A three-member, two-round panel makes six child model turns before parent synthesis, so increasing the round count directly increases cost and latency.
 
 ## Isolation and persistence
 
-Child agents load project context files such as `AGENTS.md`, but they do not load extensions, skills, or prompt templates. Their only tools are `read`, `grep`, `find`, and `ls`. They cannot invoke a nested team, run shell commands, or edit files.
+Child agents load project context files such as `AGENTS.md`, but they do not load extensions, skills, or prompt templates. Their only tools are `read`, `grep`, `find`, and `ls`. They cannot invoke a nested team, run shell commands, or edit files. The single-child runtime setup is shared with `/bora`, while `/team` retains its panel scheduling and collaboration orchestration.
 
-Review commands capture a stable patch or plan under `~/.pi/agent/team-sessions/` before dispatching the panel. Child session JSONL files live there too. The parent session stores references to those files, which allows follow-ups after `/reload` or after resuming the parent session.
+Review commands capture a stable patch or plan under `~/.pi/agent/team-sessions/` before dispatching the panel. For PRs, the extension clones the repository into an isolated directory, checks out the PR head in detached mode, verifies its commit, and runs child reviewers from that directory. It never switches the user's checkout. The isolated clone remains until parent synthesis settles, then is removed. Restored interrupted runs remove stale clones before accepting another command. Child session JSONL files live in the team session directory too. The parent session stores references to those files, which allows follow-ups after `/reload` or after resuming the parent session.
 
 The extension keeps only the latest team run active in a parent session. Starting a new run disposes the previous in-memory child sessions but leaves their JSONL files on disk.
 

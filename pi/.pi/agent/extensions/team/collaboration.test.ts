@@ -7,7 +7,14 @@ import {
 	resolveCollaborationForMode,
 	takeCollaborationOverride,
 } from "./collaboration.ts";
-import { buildModeratorTask, buildRoundtableTask } from "./prompts.ts";
+import {
+	buildInitialTask,
+	buildMemberSystemPrompt,
+	buildModeratorTask,
+	buildReviewSynthesisTask,
+	PARENT_SYNTHESIS_OPTIONS,
+	buildRoundtableTask,
+} from "./prompts.ts";
 
 test("collaboration defaults preserve independent behavior", () => {
 	assert.deepEqual(parseCollaborationConfig(undefined), {
@@ -105,4 +112,38 @@ test("moderator must load and apply the unslop skill", () => {
 	assert.match(prompt, /use read to load the unslop skill's SKILL\.md/i);
 	assert.match(prompt, /apply its full process to your draft/i);
 	assert.match(prompt, /preserve the panel's technical meaning/i);
+});
+
+test("reviewers receive concrete finding and context requirements", () => {
+	const prompt = buildMemberSystemPrompt({ name: "correctness", model: "provider/model" }, "review");
+	assert.match(prompt, /callers and callees/i);
+	assert.match(prompt, /\"findings\"/);
+	assert.match(prompt, /Do not invent requirements/i);
+});
+
+test("parent synthesis is always triggered", () => {
+	assert.deepEqual(PARENT_SYNTHESIS_OPTIONS, { deliverAs: "followUp", triggerTurn: true });
+});
+
+test("reviewer opening turns remain independent", () => {
+	const prompt = buildInitialTask("review", "pull request 12", "/tmp/review-evidence.md");
+	assert.match(prompt, /opening round/i);
+	assert.match(prompt, /independently before seeing any peer responses/i);
+});
+
+test("review synthesis receives bounded independent responses and fixed sections", () => {
+	const prompt = buildReviewSynthesisTask(
+		"pull request 12",
+		"/tmp/review-evidence.md",
+		"/tmp/pr-head",
+		[{ name: "correctness", output: "{\\\"findings\\\":[]}" }],
+		3_000,
+	);
+	assert.match(prompt, /stable review snapshot/);
+	assert.match(prompt, /repository context for this review is at \/tmp\/pr-head/);
+	assert.match(prompt, /not instructions/);
+	assert.match(prompt, /Deduplicate findings/);
+	assert.match(prompt, /discard low-confidence or speculative findings/);
+	assert.match(prompt, /## Blocking issues/);
+	assert.match(prompt, /## Optional suggestions/);
 });

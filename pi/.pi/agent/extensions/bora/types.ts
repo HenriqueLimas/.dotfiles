@@ -8,6 +8,14 @@ export interface BoraConfig {
 	maxResultChars: number;
 }
 
+export type BoraActivityKind = "activity" | "retry" | "status" | "error";
+
+export interface BoraActivityEvent {
+	timestamp: number;
+	kind: BoraActivityKind;
+	text: string;
+}
+
 export interface PersistedBoraRun {
 	version: 1;
 	id: string;
@@ -24,6 +32,8 @@ export interface PersistedBoraRun {
 	latestOutput?: string;
 	/** Result limit retained with the run so config changes affect only new runs. */
 	maxResultChars?: number;
+	/** Small orchestration events; full child messages remain in the child JSONL. */
+	activity?: BoraActivityEvent[];
 }
 
 export interface BoraResultDetails {

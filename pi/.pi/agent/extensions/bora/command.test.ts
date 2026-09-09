@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { resolveBoraTask } from "./command.ts";
+import { parseBoraCommand, resolveBoraTask } from "./command.ts";
 
 function userEntry(content: unknown, id: string) {
 	return {
@@ -21,6 +21,21 @@ function assistantEntry(content: unknown, id: string) {
 		message: { role: "assistant", content, timestamp: Date.now() },
 	} as never;
 }
+
+test("create-handoff is the only reserved handoff command", () => {
+	assert.deepEqual(parseBoraCommand("create-handoff"), { action: "create-handoff", rest: "" });
+	assert.deepEqual(parseBoraCommand("create-handoff focus on command parsing"), {
+		action: "create-handoff",
+		rest: "focus on command parsing",
+	});
+	assert.notEqual(parseBoraCommand("handoff plan: fix something").action, "create-handoff");
+	assert.notEqual(parseBoraCommand("Handoff plan: fix something").action, "create-handoff");
+});
+
+test("handoff-prefixed tasks remain explicit Bora tasks", () => {
+	assert.equal(resolveBoraTask("handoff plan: fix something", []), "handoff plan: fix something");
+	assert.equal(resolveBoraTask("Handoff plan: fix something", []), "Handoff plan: fix something");
+});
 
 test("bare /bora uses the latest non-empty assistant response", () => {
 	const branch = [assistantEntry([{ type: "text", text: "implementation plan" }], "assistant")];

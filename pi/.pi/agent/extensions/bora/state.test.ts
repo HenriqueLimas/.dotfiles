@@ -22,6 +22,7 @@ const run: PersistedBoraRun = {
 	thinkingLevel: "high",
 	status: "completed",
 	latestOutput: "Done",
+	activity: [{ timestamp: 1_000, kind: "status", text: "Completed" }],
 };
 
 function customEntry(data: unknown, id = "entry-1") {
@@ -62,6 +63,8 @@ test("persisted Bora state is validated", () => {
 	assert.equal(isPersistedBoraRun({ ...run, thinkingLevel: "turbo" }), false);
 	assert.equal(isPersistedBoraRun({ ...run, sessionFile: "" }), false);
 	assert.equal(isPersistedBoraRun({ ...run, maxResultChars: 0 }), false);
+	assert.equal(isPersistedBoraRun({ ...run, activity: [{ timestamp: 1_000, kind: "unknown", text: "bad" }] }), false);
+	assert.equal(isPersistedBoraRun({ ...run, activity: [{ timestamp: Number.NaN, kind: "status", text: "bad" }] }), false);
 });
 
 test("the latest Bora marker is selected from the active branch", () => {

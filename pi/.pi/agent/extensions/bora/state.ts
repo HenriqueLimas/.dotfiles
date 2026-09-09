@@ -7,6 +7,7 @@ export const BORA_STATE_ENTRY = "bora-state";
 
 const STATUSES = new Set<BoraStatus>(["running", "completed", "failed", "aborted"]);
 const THINKING_LEVELS = new Set<ThinkingLevel>(BORA_THINKING_LEVELS);
+const ACTIVITY_KINDS = new Set(["activity", "retry", "status", "error"]);
 
 function isNonEmptyString(value: unknown): value is string {
 	return typeof value === "string" && value.trim().length > 0;
@@ -31,6 +32,20 @@ export function isPersistedBoraRun(value: unknown): value is PersistedBoraRun {
 	if (data.thinkingLevel !== undefined && !THINKING_LEVELS.has(data.thinkingLevel as ThinkingLevel)) return false;
 	if (data.error !== undefined && typeof data.error !== "string") return false;
 	if (data.latestOutput !== undefined && typeof data.latestOutput !== "string") return false;
+	if (
+		data.activity !== undefined &&
+		(!Array.isArray(data.activity) || data.activity.some((event) =>
+			typeof event !== "object" ||
+			event === null ||
+			typeof event.timestamp !== "number" ||
+			!Number.isFinite(event.timestamp) ||
+			typeof event.kind !== "string" ||
+			!ACTIVITY_KINDS.has(event.kind) ||
+			typeof event.text !== "string"
+		))
+	) {
+		return false;
+	}
 	if (
 		data.maxResultChars !== undefined &&
 		(typeof data.maxResultChars !== "number" ||

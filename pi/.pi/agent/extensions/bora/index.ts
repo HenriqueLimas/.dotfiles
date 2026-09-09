@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { chmod, mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { type ExtensionAPI, type ExtensionContext, getAgentDir, SessionManager } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import {
 	ChildAgentSession,
@@ -9,11 +10,12 @@ import {
 	createChildAgentSession,
 	DEFAULT_CHILD_RESOURCE_POLICY,
 	IMPLEMENTATION_TOOLS,
+	textFromAssistant,
 } from "../_shared/agent-session.ts";
 import { DEFAULT_BORA_MAX_RESULT_CHARS, getBoraConfigPath, loadBoraConfig } from "./config.ts";
-import { BORA_SYSTEM_PROMPT, buildFollowupTask, buildInitialTask } from "./prompts.ts";
+import { BORA_SYSTEM_PROMPT, buildFollowupTask, buildHandoffPrompt, buildInitialTask } from "./prompts.ts";
 import { BoraStatusPopup } from "./status-popup.ts";
-import { resolveBoraTask, stripOuterQuotes } from "./command.ts";
+import { parseBoraCommand, resolveBoraTask, stripOuterQuotes } from "./command.ts";
 import {
 	BORA_STATE_ENTRY,
 	isBoraWorking,
@@ -21,7 +23,7 @@ import {
 	latestParentAssistantMessage,
 	markInterruptedBoraRun,
 } from "./state.ts";
-import type { BoraConfig, BoraResultDetails, BoraStatus, PersistedBoraRun } from "./types.ts";
+import type { BoraActivityEvent, BoraActivityKind, BoraConfig, BoraResultDetails, BoraStatus, PersistedBoraRun } from "./types.ts";
 
 const RESULT_MESSAGE = "bora-results";
 const HERDR_BACKGROUND_WORK_EVENT = "herdr:background-work";
@@ -30,7 +32,6 @@ const BORA_CHILD_RESOURCE_POLICY = {
 	...DEFAULT_CHILD_RESOURCE_POLICY,
 	noSkills: false,
 };
-const MAX_LOG_LINES = 200;
 
 interface BoraRun {
 	id: string;
@@ -45,9 +46,11 @@ interface BoraRun {
 	maxResultChars: number;
 	status: BoraStatus;
 	error?: string;
-	logs: string[];
+	activity: BoraActivityEvent[];
+	messages: AgentMessage[];
+	liveMessage?: AgentMessage;
+	revision: number;
 	output: string;
-	streamingText: string;
 	phase?: string;
 	child?: ChildAgentSession;
 	abortRequested: boolean;
@@ -60,50 +63,17 @@ function formatError(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-function takeFirstArgument(input: string): { value: string; rest: string } {
-	const source = input.trimStart();
-	if (!source) return { value: "", rest: "" };
-	const quote = source[0] === '"' || source[0] === "'" ? source[0] : undefined;
-	let escaped = false;
-	let value = "";
-	let index = quote ? 1 : 0;
-	for (; index < source.length; index++) {
-		const char = source[index]!;
-		if (escaped) {
-			value += char;
-			escaped = false;
-			continue;
-		}
-		if (char === "\\" && quote !== "'") {
-			escaped = true;
-			continue;
-		}
-		if ((quote && char === quote) || (!quote && /\s/.test(char))) {
-			index++;
-			break;
-		}
-		value += char;
-	}
-	return { value, rest: source.slice(index).trimStart() };
-}
-
 function capOutput(output: string, maxChars: number): string {
 	return output.length > maxChars ? output.slice(0, maxChars) : output;
 }
 
-function appendLog(run: BoraRun, line: string): void {
-	run.logs.push(`[${new Date().toLocaleTimeString()}] ${line}`);
-	if (run.logs.length > MAX_LOG_LINES) run.logs.splice(0, run.logs.length - MAX_LOG_LINES);
+function appendActivity(run: BoraRun, kind: BoraActivityKind, text: string): void {
+	run.activity.push({ timestamp: Date.now(), kind, text });
+	run.revision++;
 }
 
-function safeJson(value: unknown): string {
-	try {
-		const text = JSON.stringify(value);
-		if (typeof text !== "string") return "(no arguments)";
-		return text.length > 160 ? `${text.slice(0, 160)}...` : text;
-	} catch {
-		return "(unserializable arguments)";
-	}
+function messagesFromSessionManager(manager: SessionManager): AgentMessage[] {
+	return manager.getBranch().flatMap((entry) => entry.type === "message" ? [entry.message] : []);
 }
 
 function persisted(run: BoraRun): PersistedBoraRun {
@@ -121,6 +91,7 @@ function persisted(run: BoraRun): PersistedBoraRun {
 		error: run.error,
 		latestOutput: run.output,
 		maxResultChars: run.maxResultChars,
+		activity: run.activity,
 	};
 }
 
@@ -137,9 +108,13 @@ function runFromPersisted(data: PersistedBoraRun, interrupted = false): BoraRun 
 		maxResultChars: data.maxResultChars ?? DEFAULT_BORA_MAX_RESULT_CHARS,
 		status: data.status,
 		error: data.error,
-		logs: interrupted ? ["restored after interruption"] : [],
+		activity: [
+			...(data.activity ?? []),
+			...(interrupted ? [{ timestamp: Date.now(), kind: "error" as const, text: "Restored after interruption" }] : []),
+		],
+		messages: [],
+		revision: (data.activity?.length ?? 0) + (interrupted ? 1 : 0),
 		output: data.latestOutput ?? "",
-		streamingText: "",
 		abortRequested: false,
 		suppressPublication: false,
 		uiCleared: false,
@@ -227,31 +202,37 @@ export default function boraExtension(pi: ExtensionAPI) {
 		run.sessionFile = child.sessionFile;
 		run.resolvedModel = child.resolvedModel;
 		run.thinkingLevel = child.thinkingLevel;
+		run.messages = messagesFromSessionManager(child.sessionManager);
+		run.revision++;
 		persistCurrentRun(run);
 
 		child.subscribe((event) => {
 			if (!alive || currentRun !== run) return;
 			if (event.type === "agent_start") {
-				run.streamingText = "";
+				run.liveMessage = undefined;
 				run.phase = "thinking";
-				appendLog(run, "agent started");
-			} else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-				run.streamingText += event.assistantMessageEvent.delta;
-				if (run.streamingText.length > run.maxResultChars) {
-					run.streamingText = run.streamingText.slice(-run.maxResultChars);
-				}
+				appendActivity(run, "activity", "Agent started");
+			} else if (event.type === "message_update") {
+				run.liveMessage = event.message;
+				run.revision++;
 				run.phase = "responding";
 				scheduleUiUpdate();
 				return;
-			} else if (event.type === "tool_execution_start") {
+			} else if (event.type === "message_end") {
+				run.messages.push(event.message);
+				run.liveMessage = undefined;
+				run.revision++;
+			} else if (event.type === "tool_execution_start" || event.type === "tool_execution_update") {
 				run.phase = event.toolName;
-				appendLog(run, `tool ${event.toolName} started ${safeJson(event.args)}`);
+				run.revision++;
+				scheduleUiUpdate();
+				return;
 			} else if (event.type === "tool_execution_end") {
 				run.phase = `${event.toolName} ${event.isError ? "failed" : "completed"}`;
-				appendLog(run, `tool ${event.toolName} ${event.isError ? "failed" : "completed"}`);
+				run.revision++;
 			} else if (event.type === "auto_retry_start") {
 				run.phase = `retry ${event.attempt}/${event.maxAttempts}`;
-				appendLog(run, `retry ${event.attempt}/${event.maxAttempts}: ${event.errorMessage}`);
+				appendActivity(run, "retry", `Retry ${event.attempt}/${event.maxAttempts}: ${event.errorMessage}`);
 			}
 			updateUi();
 		});
@@ -302,7 +283,8 @@ export default function boraExtension(pi: ExtensionAPI) {
 		run.suppressPublication ||= options.suppressPublication;
 		run.status = "aborted";
 		run.error = options.reason;
-		appendLog(run, `aborted: ${options.reason}`);
+		run.liveMessage = undefined;
+		appendActivity(run, "error", `Aborted: ${options.reason}`);
 		run.phase = undefined;
 		run.uiCleared = options.clearUi;
 		persistCurrentRun(run);
@@ -343,10 +325,10 @@ export default function boraExtension(pi: ExtensionAPI) {
 		if (!alive || currentRun !== run || run.abortRequested) return;
 		run.status = "running";
 		run.error = undefined;
-		run.streamingText = "";
+		run.liveMessage = undefined;
 		run.phase = "starting";
 		run.uiCleared = false;
-		appendLog(run, "starting");
+		appendActivity(run, "status", "Starting");
 		beginBackgroundWork(run);
 		persistCurrentRun(run);
 		updateUi();
@@ -359,18 +341,18 @@ export default function boraExtension(pi: ExtensionAPI) {
 
 			const result = classifyTerminalResult(child.session);
 			run.output = capOutput(result.output, run.maxResultChars);
-			run.streamingText = "";
+			run.liveMessage = undefined;
 			run.status = result.status;
 			run.error = result.error;
-			appendLog(run, result.status === "completed" ? "completed" : `${result.status}: ${result.error ?? "no details"}`);
+			appendActivity(run, result.status === "completed" ? "status" : "error", result.status === "completed" ? "Completed" : `${result.status}: ${result.error ?? "no details"}`);
 		} catch (error) {
 			if (!alive || currentRun !== run) return;
 			if (!run.abortRequested) {
 				run.status = "failed";
 				run.error = formatError(error);
-				appendLog(run, `failed: ${run.error}`);
+				appendActivity(run, "error", `Failed: ${run.error}`);
 			}
-			run.streamingText = "";
+			run.liveMessage = undefined;
 		} finally {
 			if (!alive || currentRun !== run) return;
 			run.phase = undefined;
@@ -417,9 +399,10 @@ export default function boraExtension(pi: ExtensionAPI) {
 			thinkingLevel: config.thinkingLevel,
 			maxResultChars: config.maxResultChars,
 			status: "running",
-			logs: [],
+			activity: [],
+			messages: [],
+			revision: 0,
 			output: "",
-			streamingText: "",
 			abortRequested: false,
 			suppressPublication: false,
 			uiCleared: false,
@@ -462,7 +445,7 @@ export default function boraExtension(pi: ExtensionAPI) {
 	}
 
 	function statusText(run: BoraRun): string {
-		const output = run.streamingText || run.output || "(no output yet)";
+		const output = textFromAssistant(run.liveMessage) || run.output || "(no output yet)";
 		return [
 			`Bora ${run.status} · ${run.id}`,
 			`Model: ${run.resolvedModel ?? run.model}`,
@@ -485,7 +468,7 @@ export default function boraExtension(pi: ExtensionAPI) {
 		}
 
 		await ctx.ui.custom<void>(
-			(tui, theme, _keybindings, done) => {
+			(tui, theme, keybindings, done) => {
 				const popup = new BoraStatusPopup(
 					theme,
 					() => {
@@ -498,13 +481,17 @@ export default function boraExtension(pi: ExtensionAPI) {
 							task: run.task,
 							sessionFile: run.sessionFile,
 							artifactDir: run.artifactDir,
-							logs: [...run.logs],
-							streamingText: run.streamingText,
-							output: run.output,
+							activity: run.activity,
+							messages: run.messages,
+							liveMessage: run.liveMessage,
+							revision: run.revision,
+							phase: run.phase,
 							error: run.error,
 						};
 					},
 					done,
+					keybindings,
+					() => Math.max(12, tui.terminal.rows - 2),
 				);
 				const refresh = () => tui.requestRender();
 				overlayRefreshes.add(refresh);
@@ -519,7 +506,7 @@ export default function boraExtension(pi: ExtensionAPI) {
 			},
 			{
 				overlay: true,
-				overlayOptions: { width: "90%", minWidth: 60, maxHeight: "85%", anchor: "center" },
+				overlayOptions: { width: "100%", minWidth: 40, maxHeight: "100%", anchor: "center", margin: 1 },
 			},
 		);
 	}
@@ -535,6 +522,13 @@ export default function boraExtension(pi: ExtensionAPI) {
 
 		const restored = markInterruptedBoraRun(data);
 		currentRun = runFromPersisted(restored, data.status === "running");
+		if (currentRun.sessionFile) {
+			try {
+				const manager = SessionManager.open(currentRun.sessionFile, currentRun.artifactDir, currentRun.cwd);
+				currentRun.messages = messagesFromSessionManager(manager);
+				currentRun.revision += currentRun.messages.length;
+			} catch {}
+		}
 		if (restored.status !== data.status) pi.appendEntry(BORA_STATE_ENTRY, restored);
 		updateUi();
 	}
@@ -607,7 +601,7 @@ export default function boraExtension(pi: ExtensionAPI) {
 	pi.registerCommand("bora", {
 		description: "Delegate implementation work to a persistent Luna agent",
 		getArgumentCompletions: (prefix) => {
-			const values = ["followup ", "status", "abort", "config"];
+			const values = ["followup ", "create-handoff ", "status", "abort", "config"];
 			const matches = values.filter((value) => value.startsWith(prefix));
 			return matches.length ? matches.map((value) => ({ value, label: value.trim() })) : null;
 		},
@@ -615,9 +609,15 @@ export default function boraExtension(pi: ExtensionAPI) {
 			alive = true;
 			currentContext = ctx;
 			const input = args.trim();
-			const parsed = takeFirstArgument(input);
-			const action = parsed.value.toLowerCase();
+			const parsed = parseBoraCommand(input);
+			const action = parsed.action;
 			try {
+				if (action === "create-handoff") {
+					await ctx.waitForIdle();
+					pi.sendUserMessage(buildHandoffPrompt(stripOuterQuotes(parsed.rest) || undefined));
+					ctx.ui.notify("Handoff request sent to the parent agent.", "info");
+					return;
+				}
 				if (action === "status") {
 					if (parsed.rest) throw new Error("Usage: /bora status");
 					await showStatus(ctx);

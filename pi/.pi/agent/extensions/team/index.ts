@@ -1,18 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import {
-	AgentSession,
-	createAgentSession,
-	DefaultResourceLoader,
-	type ExtensionAPI,
-	type ExtensionContext,
-	getAgentDir,
-	ModelRuntime,
-	resolveCliModel,
-	SessionManager,
-} from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, type ExtensionContext, getAgentDir, SessionManager } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { resolveCollaborationForMode, takeCollaborationOverride } from "./collaboration.ts";
 import { loadTeamConfig, getTeamConfigPath } from "./config.ts";
@@ -22,13 +12,27 @@ import {
 	buildInitialTask,
 	buildMemberSystemPrompt,
 	buildModeratorTask,
+	buildReviewSynthesisTask,
 	buildRoundtableTask,
+	PARENT_SYNTHESIS_OPTIONS,
 } from "./prompts.ts";
 import { calculateTeamProgress, formatWorkingProgress, type TeamProgress } from "./progress.ts";
 import { TeamWorkingWidget } from "./working-widget.ts";
+import { determineReviewScope, selectReviewMembers, type ReviewScope } from "./review.ts";
+import { preparePullRequestCheckout } from "./pr-checkout.ts";
+import {
+	ChildAgentSession,
+	classifyTerminalResult,
+	createChildAgentSession,
+	DEFAULT_CHILD_RESOURCE_POLICY,
+	READ_ONLY_TOOLS,
+	textFromAssistant,
+} from "../_shared/agent-session.ts";
 import type {
 	AgentStatus,
 	PersistedTeamRun,
+	TeamActivityEvent,
+	TeamActivityKind,
 	TeamCollaborationConfig,
 	TeamCollaborationMode,
 	TeamConfig,
@@ -40,8 +44,6 @@ import type {
 const STATE_ENTRY = "team-state";
 const RESULT_MESSAGE = "team-results";
 const HERDR_BACKGROUND_WORK_EVENT = "herdr:background-work";
-const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"];
-const MAX_LOG_LINES = 200;
 
 type Scheduler = <T>(task: () => Promise<T>) => Promise<T>;
 
@@ -49,13 +51,15 @@ interface MemberRuntime {
 	config: TeamMemberConfig;
 	status: AgentStatus;
 	sessionFile?: string;
-	session?: AgentSession;
-	unsubscribe?: () => void;
-	logs: string[];
+	session?: ChildAgentSession;
+	activity: TeamActivityEvent[];
+	messages: AgentMessage[];
+	liveMessage?: AgentMessage;
 	output: string;
-	streamingText: string;
 	error?: string;
 	queue: Promise<void>;
+	revision: number;
+	activitySequence: number;
 }
 
 interface ResolvedTeamConfig extends Omit<TeamConfig, "collaboration"> {
@@ -67,20 +71,40 @@ interface TeamRun {
 	mode: Exclude<TeamMode, "followup">;
 	subject: string;
 	createdAt: string;
+	cwd: string;
+	gitCwd: string;
 	artifactDir: string;
+	reviewEvidencePath?: string;
+	reviewCheckoutPath?: string;
+	reviewPrTarget?: string;
+	reviewHeadRefOid?: string;
 	config: ResolvedTeamConfig;
 	members: MemberRuntime[];
 	schedule: Scheduler;
 	roundsCompleted: number;
+	currentRound: number;
+	roundSources: string[];
 	aborted: boolean;
 }
 
 interface ReviewInput {
 	subject: string;
 	evidence: string;
+	scope: ReviewScope;
+	prTarget?: string;
+	headRefOid?: string;
 }
 
-type AssistantAgentMessage = Extract<AgentMessage, { role: "assistant" }>;
+interface PreparedRun {
+	id: string;
+	artifactDir: string;
+	cwd?: string;
+	gitCwd?: string;
+	reviewEvidencePath?: string;
+	reviewCheckoutPath?: string;
+	reviewPrTarget?: string;
+	reviewHeadRefOid?: string;
+}
 
 interface TeamResultDetails {
 	round: TeamMode;
@@ -125,21 +149,6 @@ function takeFirstArgument(input: string): { value: string; rest: string } {
 	return { value, rest: source.slice(index).trimStart() };
 }
 
-function textFromAssistant(message: AgentMessage | undefined): string {
-	if (!message || message.role !== "assistant") return "";
-	return message.content
-		.filter((part): part is { type: "text"; text: string } => part.type === "text")
-		.map((part) => part.text)
-		.join("\n")
-		.trim();
-}
-
-function latestAssistant(session: AgentSession): AssistantAgentMessage | undefined {
-	return [...session.messages]
-		.reverse()
-		.find((message): message is AssistantAgentMessage => message.role === "assistant");
-}
-
 function lastParentAssistant(ctx: ExtensionContext): string | undefined {
 	for (const entry of [...ctx.sessionManager.getBranch()].reverse()) {
 		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
@@ -176,33 +185,40 @@ function createScheduler(limit: number): Scheduler {
 	};
 }
 
-function appendLog(member: MemberRuntime, line: string): void {
-	member.logs.push(`[${new Date().toLocaleTimeString()}] ${line}`);
-	if (member.logs.length > MAX_LOG_LINES) member.logs.splice(0, member.logs.length - MAX_LOG_LINES);
+function appendActivity(member: MemberRuntime, kind: TeamActivityKind, text: string): void {
+	member.activity.push({ timestamp: Date.now(), kind, text });
+	member.revision++;
 }
 
-function safeJson(value: unknown): string {
-	try {
-		const text = JSON.stringify(value);
-		return text.length > 240 ? `${text.slice(0, 240)}...` : text;
-	} catch {
-		return "(unserializable arguments)";
-	}
+function messagesFromSessionManager(manager: SessionManager): AgentMessage[] {
+	return manager.getBranch().flatMap((entry) => entry.type === "message" ? [entry.message] : []);
 }
 
 function snapshot(run: TeamRun): TeamRunSnapshot {
+	const latestActivityMember = run.members
+		.filter((member) => member.status === "running")
+		.sort((left, right) => right.activitySequence - left.activitySequence)[0]?.config.name;
 	return {
 		id: run.id,
 		mode: run.mode,
 		subject: run.subject,
 		createdAt: run.createdAt,
+		collaborationMode: run.config.collaboration.mode,
+		currentRound: run.currentRound,
+		totalRounds: run.config.collaboration.rounds,
+		roundsCompleted: run.roundsCompleted,
+		maxConcurrency: run.config.maxConcurrency,
+		roundSources: run.roundSources,
+		latestActivityMember,
 		members: run.members.map((member) => ({
 			name: member.config.name,
 			model: member.config.model,
 			status: member.status,
-			output: member.streamingText || member.output,
 			error: member.error,
-			logs: [...member.logs],
+			activity: member.activity,
+			messages: member.messages,
+			liveMessage: member.liveMessage,
+			revision: member.revision,
 		})),
 	};
 }
@@ -214,17 +230,25 @@ function persisted(run: TeamRun): PersistedTeamRun {
 		mode: run.mode,
 		subject: run.subject,
 		createdAt: run.createdAt,
+		cwd: run.cwd,
+		gitCwd: run.gitCwd,
+		reviewEvidencePath: run.reviewEvidencePath,
+		reviewCheckoutPath: run.reviewCheckoutPath,
+		reviewPrTarget: run.reviewPrTarget,
+		reviewHeadRefOid: run.reviewHeadRefOid,
 		artifactDir: run.artifactDir,
 		maxConcurrency: run.config.maxConcurrency,
-		autoSynthesize: run.config.autoSynthesize,
 		maxResultChars: run.config.maxResultChars,
 		collaboration: run.config.collaboration,
 		roundsCompleted: run.roundsCompleted,
+		currentRound: run.currentRound,
+		roundSources: run.roundSources,
 		members: run.members.map((member) => ({
 			config: member.config,
 			status: member.status,
 			sessionFile: member.sessionFile,
 			error: member.error,
+			activity: member.activity,
 		})),
 	};
 }
@@ -238,27 +262,38 @@ function isPersistedRun(value: unknown): value is PersistedTeamRun {
 export default function teamExtension(pi: ExtensionAPI) {
 	let currentRun: TeamRun | undefined;
 	let currentContext: ExtensionContext | undefined;
-	let modelRuntimePromise: Promise<ModelRuntime> | undefined;
 	let alive = true;
 	let uiUpdateTimer: ReturnType<typeof setTimeout> | undefined;
 	let workingWidgetInstalled = false;
 	let reportedBackgroundRunId: string | undefined;
+	let preparationStatus: string | undefined;
 	let awaitingSynthesisRunId: string | undefined;
+	let activitySequence = 0;
 	const dashboardRefresh = new Set<() => void>();
 
-	const getModelRuntime = () => {
-		modelRuntimePromise ??= ModelRuntime.create({ allowModelNetwork: false });
-		return modelRuntimePromise;
-	};
+	function markMemberActivity(member: MemberRuntime): void {
+		member.activitySequence = ++activitySequence;
+		member.revision++;
+	}
 
-	function beginBackgroundWork(run: TeamRun): void {
-		awaitingSynthesisRunId = undefined;
-		if (reportedBackgroundRunId === run.id) return;
+	function beginBackgroundWorkId(id: string): void {
+		if (reportedBackgroundRunId === id) return;
 		if (reportedBackgroundRunId) {
 			pi.events.emit(HERDR_BACKGROUND_WORK_EVENT, { id: reportedBackgroundRunId, active: false });
 		}
-		reportedBackgroundRunId = run.id;
-		pi.events.emit(HERDR_BACKGROUND_WORK_EVENT, { id: run.id, active: true });
+		reportedBackgroundRunId = id;
+		pi.events.emit(HERDR_BACKGROUND_WORK_EVENT, { id, active: true });
+	}
+
+	function beginBackgroundWork(run: TeamRun): void {
+		awaitingSynthesisRunId = undefined;
+		beginBackgroundWorkId(run.id);
+	}
+
+	function beginPreparationBackgroundWork(id: string): boolean {
+		if (reportedBackgroundRunId) return false;
+		beginBackgroundWorkId(id);
+		return true;
 	}
 
 	function finishBackgroundWork(runId: string): void {
@@ -275,7 +310,13 @@ export default function teamExtension(pi: ExtensionAPI) {
 	function updateUi(): void {
 		const ctx = currentContext;
 		if (ctx?.hasUI) {
-			if (!currentRun) {
+			if (preparationStatus) {
+				ctx.ui.setStatus("team", ctx.ui.theme.fg("warning", `team ${preparationStatus}`));
+				if (workingWidgetInstalled) {
+					ctx.ui.setWidget("team", undefined);
+					workingWidgetInstalled = false;
+				}
+			} else if (!currentRun) {
 				ctx.ui.setStatus("team", undefined);
 				if (workingWidgetInstalled) ctx.ui.setWidget("team", undefined);
 				workingWidgetInstalled = false;
@@ -305,6 +346,11 @@ export default function teamExtension(pi: ExtensionAPI) {
 		for (const refresh of dashboardRefresh) refresh();
 	}
 
+	function setPreparationStatus(status: string | undefined): void {
+		preparationStatus = status;
+		updateUi();
+	}
+
 	function scheduleUiUpdate(): void {
 		if (uiUpdateTimer) return;
 		uiUpdateTimer = setTimeout(() => {
@@ -319,89 +365,87 @@ export default function teamExtension(pi: ExtensionAPI) {
 		}
 	}
 
-	function disposeRun(run: TeamRun): void {
+	async function cleanupReviewCheckout(run: TeamRun): Promise<void> {
+		const checkoutPath = run.reviewCheckoutPath;
+		if (!checkoutPath) return;
+		try {
+			await rm(checkoutPath, { recursive: true, force: true });
+		} catch (error) {
+			throw new Error(`Cannot clean up isolated PR checkout ${checkoutPath}: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		run.reviewCheckoutPath = undefined;
+		persistCurrentRun(run);
+	}
+
+	async function disposeRun(run: TeamRun): Promise<void> {
 		for (const member of run.members) {
-			member.unsubscribe?.();
 			member.session?.dispose();
-			member.unsubscribe = undefined;
 			member.session = undefined;
 		}
+		await cleanupReviewCheckout(run);
 	}
 
 	async function abortRun(run: TeamRun): Promise<void> {
 		run.aborted = true;
+		const synthesisPending = awaitingSynthesisRunId === run.id;
+		if (synthesisPending) currentContext?.abort();
 		await Promise.all(
 			run.members.map(async (member) => {
 				if (member.status === "completed" || member.status === "failed" || member.status === "aborted") return;
 				member.status = "aborted";
 				member.error = "Aborted by user";
+				member.liveMessage = undefined;
+				appendActivity(member, "error", "Aborted by user");
 				await member.session?.abort().catch(() => {});
 			}),
 		);
 		updateUi();
 		persistCurrentRun(run);
-		finishBackgroundWork(run.id);
+		if (!synthesisPending) {
+			finishBackgroundWork(run.id);
+			await cleanupReviewCheckout(run);
+		}
 	}
 
-	async function ensureSession(run: TeamRun, member: MemberRuntime): Promise<AgentSession> {
+	async function ensureSession(run: TeamRun, member: MemberRuntime): Promise<ChildAgentSession> {
 		if (member.session) return member.session;
-		const modelRuntime = await getModelRuntime();
-		const resolved = resolveCliModel({
-			cliModel: member.config.model,
-			cliThinking: member.config.thinkingLevel,
-			modelRuntime,
-		});
-		if (!resolved.model) throw new Error(resolved.error ?? `Unknown model: ${member.config.model}`);
-		if (!(await modelRuntime.getAuth(resolved.model))) {
-			throw new Error(`No authentication available for ${resolved.model.provider}/${resolved.model.id}`);
-		}
-
-		const loader = new DefaultResourceLoader({
-			cwd: currentContext?.cwd ?? process.cwd(),
-			agentDir: getAgentDir(),
-			noExtensions: true,
-			noSkills: true,
-			noPromptTemplates: true,
-			noThemes: true,
-			appendSystemPromptOverride: (base) => [...base, buildMemberSystemPrompt(member.config, run.mode)],
-		});
-		await loader.reload();
-
-		const manager = member.sessionFile
-			? SessionManager.open(member.sessionFile, run.artifactDir, currentContext?.cwd)
-			: SessionManager.create(currentContext?.cwd ?? process.cwd(), run.artifactDir);
-		if (!member.sessionFile) manager.appendSessionInfo(`team ${run.id}: ${member.config.name}`);
-
-		const { session } = await createAgentSession({
-			cwd: currentContext?.cwd ?? process.cwd(),
-			agentDir: getAgentDir(),
-			modelRuntime,
-			model: resolved.model,
-			thinkingLevel: resolved.thinkingLevel ?? member.config.thinkingLevel,
+		const session = await createChildAgentSession({
+			cwd: run.cwd,
+			artifactDir: run.artifactDir,
+			sessionFile: member.sessionFile,
+			sessionName: `team ${run.id}: ${member.config.name}`,
+			model: member.config.model,
+			thinkingLevel: member.config.thinkingLevel,
 			tools: READ_ONLY_TOOLS,
-			resourceLoader: loader,
-			sessionManager: manager,
+			appendSystemPrompt: buildMemberSystemPrompt(member.config, run.mode),
+			resourcePolicy: DEFAULT_CHILD_RESOURCE_POLICY,
 		});
 		member.session = session;
 		member.sessionFile = session.sessionFile;
+		member.messages = messagesFromSessionManager(session.sessionManager);
+		member.revision++;
 		persistCurrentRun(run);
-		member.unsubscribe = session.subscribe((event) => {
+		session.subscribe((event) => {
 			if (event.type === "agent_start") {
-				member.streamingText = "";
-				appendLog(member, "model started");
-			} else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-				member.streamingText += event.assistantMessageEvent.delta;
-				if (member.streamingText.length > run.config.maxResultChars) {
-					member.streamingText = member.streamingText.slice(-run.config.maxResultChars);
-				}
+				member.liveMessage = undefined;
+				appendActivity(member, "activity", "Model started");
+				markMemberActivity(member);
+			} else if (event.type === "message_update") {
+				member.liveMessage = event.message;
+				markMemberActivity(member);
 				scheduleUiUpdate();
 				return;
-			} else if (event.type === "tool_execution_start") {
-				appendLog(member, `${event.toolName} ${safeJson(event.args)}`);
-			} else if (event.type === "tool_execution_end") {
-				appendLog(member, `${event.toolName} ${event.isError ? "failed" : "completed"}`);
+			} else if (event.type === "message_end") {
+				member.messages.push(event.message);
+				member.liveMessage = undefined;
+				markMemberActivity(member);
+			} else if (event.type === "tool_execution_start" || event.type === "tool_execution_update" || event.type === "tool_execution_end") {
+				markMemberActivity(member);
+				scheduleUiUpdate();
+				return;
 			} else if (event.type === "auto_retry_start") {
-				appendLog(member, `retry ${event.attempt}/${event.maxAttempts}: ${event.errorMessage}`);
+				appendActivity(member, "retry", `Retry ${event.attempt}/${event.maxAttempts}: ${event.errorMessage}`);
+				markMemberActivity(member);
 			}
 			updateUi();
 		});
@@ -415,30 +459,24 @@ export default function teamExtension(pi: ExtensionAPI) {
 		}
 		member.status = "running";
 		member.error = undefined;
-		member.streamingText = "";
-		appendLog(member, "starting");
+		member.liveMessage = undefined;
+		appendActivity(member, "status", "Starting");
+		markMemberActivity(member);
 		updateUi();
 		try {
 			const session = await ensureSession(run, member);
-			await session.prompt(task, { expandPromptTemplates: false });
-			const last = latestAssistant(session);
-			member.output = textFromAssistant(last).slice(0, run.config.maxResultChars);
-			member.streamingText = "";
-			if (!last) {
-				member.status = "failed";
-				member.error = "Model returned no assistant message";
-			} else if (last.stopReason === "error" || last.stopReason === "aborted") {
-				member.status = last.stopReason === "aborted" ? "aborted" : "failed";
-				member.error = last.errorMessage ?? `Model stopped with ${last.stopReason}`;
-			} else {
-				member.status = "completed";
-			}
-			appendLog(member, member.status);
+			await session.session.prompt(task, { expandPromptTemplates: false });
+			const result = classifyTerminalResult(session.session);
+			member.output = result.output.slice(0, run.config.maxResultChars);
+			member.liveMessage = undefined;
+			member.status = result.status;
+			member.error = result.error;
+			appendActivity(member, result.status === "completed" ? "status" : "error", result.status);
 		} catch (error) {
-			member.streamingText = "";
+			member.liveMessage = undefined;
 			member.status = run.aborted ? "aborted" : "failed";
 			member.error = error instanceof Error ? error.message : String(error);
-			appendLog(member, member.error);
+			appendActivity(member, "error", member.error);
 		}
 		persistCurrentRun(run);
 		updateUi();
@@ -446,6 +484,7 @@ export default function teamExtension(pi: ExtensionAPI) {
 
 	function enqueue(run: TeamRun, member: MemberRuntime, task: string): Promise<void> {
 		member.status = "queued";
+		member.revision++;
 		const next = member.queue
 			.catch(() => {})
 			.then(() => run.schedule(() => executeMember(run, member, task)));
@@ -473,33 +512,58 @@ export default function teamExtension(pi: ExtensionAPI) {
 	}
 
 	function formatResults(run: TeamRun, round: TeamMode, members: MemberRuntime[]): string {
+		if (run.mode === "review") {
+			return buildReviewSynthesisTask(
+				run.subject,
+				run.reviewEvidencePath,
+				run.cwd,
+				members.map((member) => ({
+					name: member.config.name,
+					output: member.error ? `Reviewer failed: ${member.error}\n${member.output}` : member.output || "No findings reported.",
+				})),
+				run.config.collaboration.maxTranscriptChars,
+			);
+		}
+
 		const sections = members.map((member) => {
 			const body = member.error ? `Error: ${member.error}\n\n${member.output}` : member.output || "No response.";
 			return `## ${member.config.name} (${member.config.model}, ${member.status})\n\n${body}`;
 		});
-		const synthesisRequest = run.config.autoSynthesize ? `\n\n${buildModeratorTask()}` : "";
 		const completion =
 			round !== "followup" && run.config.collaboration.mode === "roundtable"
 				? `finished its ${run.roundsCompleted}-round roundtable`
 				: "finished its panel round";
-		return `The ${round} team ${completion} for: ${run.subject}\n\n${sections.join("\n\n---\n\n")}${synthesisRequest}`;
+		return `The ${round} team ${completion} for: ${run.subject}\n\n${sections.join("\n\n---\n\n")}\n\n${buildModeratorTask()}`;
 	}
 
-	async function runPanelRounds(run: TeamRun, openingTask: string): Promise<void> {
+	async function runPanelRounds(
+		run: TeamRun,
+		openingTask: string,
+		members: MemberRuntime[] = run.members,
+		publish = true,
+	): Promise<void> {
 		const totalRounds = run.config.collaboration.rounds;
-		for (const member of run.members) appendLog(member, `round 1/${totalRounds}: independent response`);
-		await Promise.allSettled(run.members.map((member) => enqueue(run, member, openingTask)));
+		run.currentRound = 1;
+		run.roundSources = [];
+		for (const member of members) appendActivity(member, "round", `Round 1/${totalRounds}: independent response`);
+		persistCurrentRun(run);
+		updateUi();
+		await Promise.allSettled(members.map((member) => enqueue(run, member, openingTask)));
 		if (!alive || currentRun !== run || run.aborted) return;
 		run.roundsCompleted = 1;
 		persistCurrentRun(run);
 
-		let participants = run.members.filter((member) => member.status === "completed");
+		let participants = members.filter((member) => member.status === "completed");
 		for (let round = 2; round <= totalRounds && participants.length >= 2; round++) {
 			const previousResponses = participants.map((member) => ({
 				name: member.config.name,
 				output: member.output,
 			}));
-			for (const member of participants) appendLog(member, `round ${round}/${totalRounds}: peer critique`);
+			run.currentRound = round;
+			run.roundSources = previousResponses.map((response) => response.name);
+			for (const member of participants) appendActivity(member, "round", `Round ${round}/${totalRounds}: peer critique`);
+			persistCurrentRun(run);
+			updateUi();
 			await Promise.allSettled(
 				participants.map((member) =>
 					enqueue(
@@ -520,19 +584,18 @@ export default function teamExtension(pi: ExtensionAPI) {
 			participants = participants.filter((member) => member.status === "completed");
 		}
 
-		await publishResults(run, run.mode, run.members);
+		if (publish) await publishResults(run, run.mode, run.members);
 	}
 
 	async function publishResults(run: TeamRun, round: TeamMode, members: MemberRuntime[]): Promise<void> {
 		if (!alive || currentRun !== run || run.aborted) return;
 		persistCurrentRun();
 		const details = resultDetails(run, round, members);
-		if (run.config.autoSynthesize) awaitingSynthesisRunId = run.id;
+		awaitingSynthesisRunId = run.id;
 		pi.sendMessage(
 			{ customType: RESULT_MESSAGE, content: formatResults(run, round, members), display: true, details },
-			{ deliverAs: "followUp", triggerTurn: run.config.autoSynthesize },
+			PARENT_SYNTHESIS_OPTIONS,
 		);
-		if (!run.config.autoSynthesize) finishBackgroundWork(run.id);
 	}
 
 	async function launch(
@@ -541,15 +604,16 @@ export default function teamExtension(pi: ExtensionAPI) {
 		config: TeamConfig,
 		ctx: ExtensionContext,
 		evidencePath?: string,
-		preparedRun?: { id: string; artifactDir: string },
+		preparedRun?: PreparedRun,
 		collaborationOverride?: TeamCollaborationMode,
+		memberConfigs?: TeamMemberConfig[],
 	): Promise<TeamRun> {
-		if (currentRun?.members.some((member) => member.status === "queued" || member.status === "running")) {
+		if (currentRun && (currentRun.members.some((member) => member.status === "queued" || member.status === "running") || awaitingSynthesisRunId === currentRun.id)) {
 			const replace = ctx.hasUI && (await ctx.ui.confirm("Replace active team?", "This aborts the current panel run."));
 			if (!replace) throw new Error("A team is already working");
 			await abortRun(currentRun);
 		}
-		if (currentRun) disposeRun(currentRun);
+		if (currentRun) await disposeRun(currentRun);
 
 		const id = preparedRun?.id ?? `${Date.now().toString(36)}-${randomUUID().slice(0, 6)}`;
 		const parentId = ctx.sessionManager.getSessionId().replace(/[^a-zA-Z0-9_-]/g, "_");
@@ -559,23 +623,35 @@ export default function teamExtension(pi: ExtensionAPI) {
 			...config,
 			collaboration: resolveCollaborationForMode(config.collaboration, mode, collaborationOverride),
 		};
+		const activeMemberConfigs = memberConfigs ?? config.models;
+		if (activeMemberConfigs.length === 0) throw new Error("Team run has no members");
 		const run: TeamRun = {
 			id,
 			mode,
 			subject,
 			createdAt: new Date().toISOString(),
+			cwd: preparedRun?.cwd ?? ctx.cwd,
+			gitCwd: preparedRun?.gitCwd ?? ctx.cwd,
 			artifactDir,
+			reviewEvidencePath: preparedRun?.reviewEvidencePath ?? evidencePath,
+			reviewCheckoutPath: preparedRun?.reviewCheckoutPath,
+			reviewPrTarget: preparedRun?.reviewPrTarget,
+			reviewHeadRefOid: preparedRun?.reviewHeadRefOid,
 			config: resolvedConfig,
-			members: config.models.map((member) => ({
+			members: activeMemberConfigs.map((member) => ({
 				config: member,
 				status: "queued",
-				logs: [],
+				activity: [],
+				messages: [],
 				output: "",
-				streamingText: "",
 				queue: Promise.resolve(),
+				revision: 0,
+				activitySequence: 0,
 			})),
-			schedule: createScheduler(Math.min(config.maxConcurrency, config.models.length)),
+			schedule: createScheduler(Math.min(config.maxConcurrency, activeMemberConfigs.length)),
 			roundsCompleted: 0,
+			currentRound: 1,
+			roundSources: [],
 			aborted: false,
 		};
 		currentRun = run;
@@ -584,11 +660,12 @@ export default function teamExtension(pi: ExtensionAPI) {
 		persistCurrentRun();
 		updateUi();
 
-		const task = buildInitialTask(mode, subject, evidencePath);
-		void runPanelRounds(run, task).catch((error) => {
+		const task = buildInitialTask(mode, subject, run.reviewEvidencePath);
+		void runPanelRounds(run, task).catch(async (error) => {
 			if (currentRun !== run || run.aborted) return;
 			run.aborted = true;
 			finishBackgroundWork(run.id);
+			await cleanupReviewCheckout(run).catch(() => {});
 			currentContext?.ui.notify(`Team orchestration failed: ${error instanceof Error ? error.message : String(error)}`, "error");
 		});
 		return run;
@@ -601,12 +678,39 @@ export default function teamExtension(pi: ExtensionAPI) {
 		return output;
 	}
 
+	function parseChangedFileList(output: string): string[] {
+		return output
+			.split("\n")
+			.map((line) => line.trim())
+			.filter(Boolean);
+	}
+
+	function parsePullRequestMetadata(metadata: string): { files: string[]; number?: number; headRefOid?: string } {
+		try {
+			const value = JSON.parse(metadata) as {
+				files?: Array<{ path?: unknown }>;
+				number?: unknown;
+				headRefOid?: unknown;
+			};
+			return {
+				files: (value.files ?? []).flatMap((file) => (typeof file.path === "string" ? [file.path] : [])),
+				number: typeof value.number === "number" ? value.number : undefined,
+				headRefOid: typeof value.headRefOid === "string" ? value.headRefOid : undefined,
+			};
+		} catch {
+			return { files: [] };
+		}
+	}
+
 	async function prepareReview(input: string, ctx: ExtensionContext): Promise<ReviewInput> {
 		const first = takeFirstArgument(input);
 		const kind = first.value.toLowerCase();
 		let rest = stripOuterQuotes(first.rest);
 		let subject: string;
 		let evidence: string;
+		let changedFiles: string[] = [];
+		let prTarget: string | undefined;
+		let headRefOid: string | undefined;
 
 		if (["uncommitted", "uncommited", "uncommitted code", "uncommited code"].includes(kind)) {
 			if (rest.toLowerCase().startsWith("code")) rest = rest.slice(4).trimStart();
@@ -614,7 +718,10 @@ export default function teamExtension(pi: ExtensionAPI) {
 				captureCommand("git", ["status", "--short"], ctx.cwd),
 				captureCommand("git", ["diff", "--no-ext-diff", "--unified=80"], ctx.cwd),
 				captureCommand("git", ["diff", "--cached", "--no-ext-diff", "--unified=80"], ctx.cwd),
+				captureCommand("git", ["diff", "--no-ext-diff", "--name-only"], ctx.cwd),
+				captureCommand("git", ["diff", "--cached", "--no-ext-diff", "--name-only"], ctx.cwd),
 			]);
+			changedFiles = [...parseChangedFileList(parts[3]), ...parseChangedFileList(parts[4])];
 			subject = `uncommitted code${rest ? `, focus: ${rest}` : ""}`;
 			evidence = `# Git status\n\n\`\`\`text\n${parts[0]}\n\`\`\`\n\n# Unstaged diff\n\n\`\`\`diff\n${parts[1]}\n\`\`\`\n\n# Staged diff\n\n\`\`\`diff\n${parts[2]}\n\`\`\``;
 		} else if (kind === "pr" || kind === "pull-request" || kind === "pullrequest") {
@@ -622,16 +729,25 @@ export default function teamExtension(pi: ExtensionAPI) {
 			const target = targetArg.value;
 			const ghTarget = target ? [target] : [];
 			const [metadata, diff] = await Promise.all([
-				captureCommand("gh", ["pr", "view", ...ghTarget, "--json", "number,title,body,url,baseRefName,headRefName,files"], ctx.cwd),
+				captureCommand("gh", ["pr", "view", ...ghTarget, "--json", "number,title,body,url,baseRefName,headRefName,headRefOid,files"], ctx.cwd),
 				captureCommand("gh", ["pr", "diff", ...ghTarget], ctx.cwd),
 			]);
+			const pullRequest = parsePullRequestMetadata(metadata);
+			if (!pullRequest.headRefOid) throw new Error("GitHub did not return the PR head commit; refusing to review the current checkout");
+			changedFiles = pullRequest.files;
+			prTarget = target || (pullRequest.number === undefined ? undefined : String(pullRequest.number));
+			headRefOid = pullRequest.headRefOid;
 			subject = `pull request ${target || "for the current branch"}${targetArg.rest ? `, focus: ${stripOuterQuotes(targetArg.rest)}` : ""}`;
 			evidence = `# Pull request metadata\n\n\`\`\`json\n${metadata}\n\`\`\`\n\n# Pull request diff\n\n\`\`\`diff\n${diff}\n\`\`\``;
 		} else if (["commit", "committed", "commited", "committed code", "commited code"].includes(kind)) {
 			if (rest.toLowerCase() === "code" || rest.toLowerCase().startsWith("code ")) rest = rest.slice(4).trimStart();
 			const targetArg = takeFirstArgument(rest);
 			const target = targetArg.value || "HEAD";
-			const patch = await captureCommand("git", ["show", "--stat", "--patch", "--find-renames", target], ctx.cwd);
+			const [patch, files] = await Promise.all([
+				captureCommand("git", ["show", "--stat", "--patch", "--find-renames", target], ctx.cwd),
+				captureCommand("git", ["show", "--format=", "--name-only", "--find-renames", target], ctx.cwd),
+			]);
+			changedFiles = parseChangedFileList(files);
 			subject = `commit ${target}${targetArg.rest ? `, focus: ${stripOuterQuotes(targetArg.rest)}` : ""}`;
 			evidence = `# Commit ${target}\n\n\`\`\`diff\n${patch}\n\`\`\``;
 		} else if (kind === "plan") {
@@ -651,7 +767,8 @@ export default function teamExtension(pi: ExtensionAPI) {
 			throw new Error("Review target must be uncommitted, pr, commit, or plan");
 		}
 
-		return { subject, evidence };
+		const scope = determineReviewScope(changedFiles, evidence);
+		return { subject, evidence, scope, prTarget, headRefOid };
 	}
 
 	async function showDashboard(ctx: ExtensionContext): Promise<void> {
@@ -665,15 +782,20 @@ export default function teamExtension(pi: ExtensionAPI) {
 			return;
 		}
 		await ctx.ui.custom<void>(
-			(tui, theme, _keybindings, done) => {
-				const dashboard = new TeamDashboard(theme, () => snapshot(currentRun!), done);
+			(tui, theme, keybindings, done) => {
+				const dashboard = new TeamDashboard(
+					theme,
+					() => snapshot(currentRun!),
+					done,
+					keybindings,
+					() => Math.max(12, tui.terminal.rows - 2),
+				);
 				const refresh = () => tui.requestRender();
 				dashboardRefresh.add(refresh);
 				return {
 					render: (width) => dashboard.render(width),
 					handleInput: (data) => {
-						dashboard.handleInput(data);
-						tui.requestRender();
+						if (dashboard.handleInput(data)) tui.requestRender();
 					},
 					invalidate: () => dashboard.invalidate(),
 					dispose: () => dashboardRefresh.delete(refresh),
@@ -681,13 +803,13 @@ export default function teamExtension(pi: ExtensionAPI) {
 			},
 			{
 				overlay: true,
-				overlayOptions: { width: "90%", minWidth: 50, maxHeight: "85%", anchor: "center" },
+				overlayOptions: { width: "100%", minWidth: 40, maxHeight: "100%", anchor: "center", margin: 1 },
 			},
 		);
 	}
 
-	function restoreRun(ctx: ExtensionContext): void {
-		disposeRunIfPresent();
+	async function restoreRun(ctx: ExtensionContext): Promise<void> {
+		if (currentRun) await disposeRun(currentRun);
 		const entry = [...ctx.sessionManager.getBranch()]
 			.reverse()
 			.find((candidate) => candidate.type === "custom" && candidate.customType === STATE_ENTRY);
@@ -697,25 +819,37 @@ export default function teamExtension(pi: ExtensionAPI) {
 			return;
 		}
 		const data = entry.data;
+		const restoredChildCwd = data.reviewCheckoutPath
+			? data.cwd ?? ctx.cwd
+			: data.reviewHeadRefOid
+				? data.gitCwd ?? ctx.cwd
+				: data.cwd ?? ctx.cwd;
 		const members: MemberRuntime[] = data.members.map((member) => {
 			let output = "";
+			let messages: AgentMessage[] = [];
 			if (member.sessionFile) {
 				try {
-					const manager = SessionManager.open(member.sessionFile, data.artifactDir, ctx.cwd);
-					const message = [...manager.buildSessionContext().messages].reverse().find((item) => item.role === "assistant");
-					output = textFromAssistant(message as AgentMessage | undefined);
+					const manager = SessionManager.open(member.sessionFile, data.artifactDir, restoredChildCwd);
+					messages = messagesFromSessionManager(manager);
+					output = textFromAssistant([...messages].reverse().find((message) => message.role === "assistant"));
 				} catch {}
 			}
 			const status = member.status === "queued" || member.status === "running" ? "aborted" : member.status;
+			const activity = [...(member.activity ?? [])];
+			if (status === "aborted" && member.status !== "aborted") {
+				activity.push({ timestamp: Date.now(), kind: "error", text: "Previous pi runtime ended before this agent completed." });
+			}
 			return {
 				config: member.config,
 				status,
 				sessionFile: member.sessionFile,
-				logs: status === "aborted" ? ["Previous pi runtime ended before this agent completed."] : [],
+				activity,
+				messages,
 				output,
-				streamingText: "",
 				error: status === "aborted" ? "Interrupted by session reload or shutdown" : member.error,
 				queue: Promise.resolve(),
+				revision: activity.length + messages.length,
+				activitySequence: 0,
 			};
 		});
 		currentRun = {
@@ -723,24 +857,38 @@ export default function teamExtension(pi: ExtensionAPI) {
 			mode: data.mode,
 			subject: data.subject,
 			createdAt: data.createdAt,
+			cwd: restoredChildCwd,
+			gitCwd: data.gitCwd ?? ctx.cwd,
 			artifactDir: data.artifactDir,
+			reviewEvidencePath: data.reviewEvidencePath,
+			reviewCheckoutPath: data.reviewCheckoutPath,
+			reviewPrTarget: data.reviewPrTarget,
+			reviewHeadRefOid: data.reviewHeadRefOid,
 			config: {
 				models: members.map((member) => member.config),
 				maxConcurrency: data.maxConcurrency ?? members.length,
-				autoSynthesize: data.autoSynthesize ?? true,
 				maxResultChars: data.maxResultChars ?? 30_000,
 				collaboration: data.collaboration ?? { mode: "independent", rounds: 1, maxTranscriptChars: 30_000 },
 			},
 			members,
 			schedule: createScheduler(Math.max(1, data.maxConcurrency ?? members.length)),
 			roundsCompleted: data.roundsCompleted ?? 1,
+			currentRound: data.currentRound ?? data.roundsCompleted ?? 1,
+			roundSources: data.roundSources ?? [],
 			aborted: false,
 		};
+		if (currentRun.reviewCheckoutPath) {
+			try {
+				await cleanupReviewCheckout(currentRun);
+				currentRun.cwd = currentRun.gitCwd;
+				persistCurrentRun(currentRun);
+			} catch (error) {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+			}
+		} else if (currentRun.reviewHeadRefOid) {
+			currentRun.cwd = currentRun.gitCwd;
+		}
 		updateUi();
-	}
-
-	function disposeRunIfPresent(): void {
-		if (currentRun) disposeRun(currentRun);
 	}
 
 	pi.registerMessageRenderer(RESULT_MESSAGE, (message, { expanded, outputPad }, theme) => {
@@ -758,13 +906,21 @@ export default function teamExtension(pi: ExtensionAPI) {
 		return new Text(text, outputPad, 0);
 	});
 
-	pi.on("session_start", (_event, ctx) => {
+	pi.on("session_start", async (_event, ctx) => {
 		alive = true;
 		currentContext = ctx;
-		restoreRun(ctx);
+		await restoreRun(ctx);
 	});
-	pi.on("agent_settled", () => {
-		if (awaitingSynthesisRunId) finishBackgroundWork(awaitingSynthesisRunId);
+	pi.on("agent_settled", async () => {
+		const runId = awaitingSynthesisRunId;
+		if (!runId) return;
+		finishBackgroundWork(runId);
+		if (currentRun?.id !== runId) return;
+		try {
+			await cleanupReviewCheckout(currentRun);
+		} catch (error) {
+			currentContext?.ui.notify(error instanceof Error ? error.message : String(error), "error");
+		}
 	});
 	pi.on("session_tree", async (_event, ctx) => {
 		const previous = currentRun;
@@ -772,9 +928,12 @@ export default function teamExtension(pi: ExtensionAPI) {
 			previous.aborted = true;
 			await Promise.all(previous.members.map((member) => member.session?.abort().catch(() => {})));
 		}
-		if (previous) finishBackgroundWork(previous.id);
+		if (previous) {
+			finishBackgroundWork(previous.id);
+			await disposeRun(previous);
+		}
 		currentContext = ctx;
-		restoreRun(ctx);
+		await restoreRun(ctx);
 	});
 	pi.on("session_compact", () => persistCurrentRun());
 	pi.on("session_shutdown", async () => {
@@ -785,7 +944,7 @@ export default function teamExtension(pi: ExtensionAPI) {
 		if (currentRun) {
 			currentRun.aborted = true;
 			await Promise.all(currentRun.members.map((member) => member.session?.abort().catch(() => {})));
-			disposeRun(currentRun);
+			await disposeRun(currentRun).catch(() => {});
 		}
 		dashboardRefresh.clear();
 	});
@@ -828,13 +987,16 @@ export default function teamExtension(pi: ExtensionAPI) {
 				if (action === "config") {
 					const config = await loadTeamConfig();
 					const roster = config.models.map((member) => `${member.name}=${member.model}`).join(", ");
+					const reviewRoster = config.reviewModels
+						? `\nReview roster: ${config.reviewModels.map((member) => `${member.name}=${member.model}`).join(", ")}`
+						: "";
 					const describe = (mode: "brainstorm" | "review") => {
 						const collaboration = config.collaboration[mode];
 						return collaboration.mode === "roundtable"
 							? `${mode}: roundtable (${collaboration.rounds} rounds)`
 							: `${mode}: independent`;
 					};
-					ctx.ui.notify(`Team config: ${getTeamConfigPath()}\n${roster}\n${describe("brainstorm")}\n${describe("review")}`, "info");
+					ctx.ui.notify(`Team config: ${getTeamConfigPath()}\n${roster}${reviewRoster}\n${describe("brainstorm")}\n${describe("review")}`, "info");
 					return;
 				}
 				if (action === "abort") {
@@ -858,19 +1020,69 @@ export default function teamExtension(pi: ExtensionAPI) {
 					const parentId = ctx.sessionManager.getSessionId().replace(/[^a-zA-Z0-9_-]/g, "_");
 					const preparationDir = join(getAgentDir(), "team-sessions", parentId, id);
 					await mkdir(preparationDir, { recursive: true, mode: 0o700 });
-					const review = await prepareReview(collaboration.rest, ctx);
-					const evidencePath = join(preparationDir, "review-evidence.md");
-					await writeFile(evidencePath, review.evidence, { encoding: "utf8", mode: 0o600 });
-					const run = await launch(
-						"review",
-						review.subject,
-						config,
-						ctx,
-						evidencePath,
-						{ id, artifactDir: preparationDir },
-						collaboration.mode,
-					);
-					ctx.ui.notify(`Team ${run.id} started. Review snapshot: ${evidencePath}`, "info");
+					const preparationWorkId = `team:preparing:${id}`;
+					const ownsPreparationWork = beginPreparationBackgroundWork(preparationWorkId);
+					setPreparationStatus("pending · preparing review");
+					try {
+						const review = await prepareReview(collaboration.rest, ctx);
+						const evidencePath = join(preparationDir, "review-evidence.md");
+						await writeFile(evidencePath, review.evidence, { encoding: "utf8", mode: 0o600 });
+						const reviewMembers = config.reviewModels
+							? selectReviewMembers(config.reviewModels, review.scope)
+							: undefined;
+						if (config.reviewModels && !reviewMembers?.length) {
+							throw new Error("reviewModels must include at least one default or relevant specialist reviewer");
+						}
+
+						let checkoutPath: string | undefined;
+						try {
+							if (review.headRefOid) {
+								setPreparationStatus("pending · preparing isolated checkout");
+								checkoutPath = await preparePullRequestCheckout({
+									target: review.prTarget,
+									headRefOid: review.headRefOid,
+									preparationDir,
+									sourceCwd: ctx.cwd,
+									captureCommand,
+								});
+							}
+							const run = await launch(
+								"review",
+								review.subject,
+								config,
+								ctx,
+								evidencePath,
+								{
+									id,
+									artifactDir: preparationDir,
+									cwd: checkoutPath,
+									gitCwd: ctx.cwd,
+									reviewEvidencePath: evidencePath,
+									reviewCheckoutPath: checkoutPath,
+									reviewPrTarget: review.prTarget,
+									reviewHeadRefOid: review.headRefOid,
+								},
+								collaboration.mode,
+								reviewMembers,
+							);
+							const specialists = review.scope.specialists.length ? ` Specialists: ${review.scope.specialists.join(", ")}.` : "";
+							ctx.ui.notify(`Team ${run.id} started (${review.scope.risk}-risk review).${specialists} Review snapshot: ${evidencePath}`, "info");
+						} catch (error) {
+							if (checkoutPath) {
+								try {
+									await rm(checkoutPath, { recursive: true, force: true });
+								} catch (cleanupError) {
+									throw new Error(
+										`${error instanceof Error ? error.message : String(error)}. Cleanup also failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+									);
+								}
+							}
+							throw error;
+						}
+					} finally {
+						setPreparationStatus(undefined);
+						if (ownsPreparationWork) finishBackgroundWork(preparationWorkId);
+					}
 					return;
 				}
 				if (action === "followup" || action === "follow-up") {
@@ -885,6 +1097,26 @@ export default function teamExtension(pi: ExtensionAPI) {
 					const question = stripOuterQuotes(named || targetAll ? targetArg.rest : parsed.rest);
 					if (!question) throw new Error("Usage: /team followup [member|all] <question>");
 					const run = currentRun;
+					if (run.mode === "review" && run.reviewHeadRefOid && !run.reviewCheckoutPath) {
+						const preparationWorkId = `team:preparing:${run.id}`;
+						const ownsPreparationWork = beginPreparationBackgroundWork(preparationWorkId);
+						setPreparationStatus("pending · preparing isolated checkout");
+						try {
+							const checkoutPath = await preparePullRequestCheckout({
+								target: run.reviewPrTarget,
+								headRefOid: run.reviewHeadRefOid,
+								preparationDir: run.artifactDir,
+								sourceCwd: run.gitCwd,
+								captureCommand,
+							});
+							run.reviewCheckoutPath = checkoutPath;
+							run.cwd = checkoutPath;
+							persistCurrentRun(run);
+						} finally {
+							setPreparationStatus(undefined);
+							if (ownsPreparationWork) finishBackgroundWork(preparationWorkId);
+						}
+					}
 					const targets = named ? [named] : run.members;
 					beginBackgroundWork(run);
 					const pending = targets.map((member) => enqueue(run, member, buildFollowupTask(question)));

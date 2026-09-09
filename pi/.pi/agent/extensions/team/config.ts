@@ -14,22 +14,22 @@ function expectRecord(value: unknown, label: string): Record<string, unknown> {
 	return value as Record<string, unknown>;
 }
 
-function parseMember(value: unknown, index: number): TeamMemberConfig {
-	const member = expectRecord(value, `models[${index}]`);
+function parseMember(value: unknown, label: string, index: number): TeamMemberConfig {
+	const member = expectRecord(value, `${label}[${index}]`);
 	if (typeof member.name !== "string" || member.name.trim() === "") {
-		throw new Error(`models[${index}].name must be a non-empty string`);
+		throw new Error(`${label}[${index}].name must be a non-empty string`);
 	}
 	if (typeof member.model !== "string" || member.model.trim() === "") {
-		throw new Error(`models[${index}].model must be a non-empty string`);
+		throw new Error(`${label}[${index}].model must be a non-empty string`);
 	}
 	if (
 		member.thinkingLevel !== undefined &&
 		(typeof member.thinkingLevel !== "string" || !THINKING_LEVELS.has(member.thinkingLevel as ThinkingLevel))
 	) {
-		throw new Error(`models[${index}].thinkingLevel is invalid`);
+		throw new Error(`${label}[${index}].thinkingLevel is invalid`);
 	}
 	if (member.perspective !== undefined && typeof member.perspective !== "string") {
-		throw new Error(`models[${index}].perspective must be a string`);
+		throw new Error(`${label}[${index}].perspective must be a string`);
 	}
 
 	return {
@@ -40,26 +40,29 @@ function parseMember(value: unknown, index: number): TeamMemberConfig {
 	};
 }
 
-export function parseTeamConfig(value: unknown): TeamConfig {
-	const config = expectRecord(value, "team config");
-	if (!Array.isArray(config.models) || config.models.length === 0) {
-		throw new Error("team config models must be a non-empty array");
+function parseMembers(value: unknown, label: string): TeamMemberConfig[] {
+	if (!Array.isArray(value) || value.length === 0) {
+		throw new Error(`${label} must be a non-empty array`);
 	}
 
-	const models = config.models.map(parseMember);
+	const members = value.map((member, index) => parseMember(member, label, index));
 	const names = new Set<string>();
-	for (const member of models) {
+	for (const member of members) {
 		const key = member.name.toLowerCase();
-		if (names.has(key)) throw new Error(`Duplicate team member name: ${member.name}`);
+		if (names.has(key)) throw new Error(`Duplicate team member name in ${label}: ${member.name}`);
 		names.add(key);
 	}
+	return members;
+}
+
+export function parseTeamConfig(value: unknown): TeamConfig {
+	const config = expectRecord(value, "team config");
+	const models = parseMembers(config.models, "models");
+	const reviewModels = config.reviewModels === undefined ? undefined : parseMembers(config.reviewModels, "reviewModels");
 
 	const maxConcurrency = config.maxConcurrency ?? models.length;
 	if (!Number.isInteger(maxConcurrency) || (maxConcurrency as number) < 1 || (maxConcurrency as number) > 16) {
 		throw new Error("maxConcurrency must be an integer between 1 and 16");
-	}
-	if (config.autoSynthesize !== undefined && typeof config.autoSynthesize !== "boolean") {
-		throw new Error("autoSynthesize must be a boolean");
 	}
 	const maxResultChars = config.maxResultChars ?? 30_000;
 	if (!Number.isInteger(maxResultChars) || (maxResultChars as number) < 1_000 || (maxResultChars as number) > 100_000) {
@@ -68,8 +71,8 @@ export function parseTeamConfig(value: unknown): TeamConfig {
 
 	return {
 		models,
+		reviewModels,
 		maxConcurrency: maxConcurrency as number,
-		autoSynthesize: config.autoSynthesize ?? true,
 		maxResultChars: maxResultChars as number,
 		collaboration: parseCollaborationByMode(config.collaboration),
 	};

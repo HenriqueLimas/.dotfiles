@@ -1,4 +1,4 @@
-import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 
 export type TeamMode = "brainstorm" | "review" | "followup";
 export type AgentStatus = "queued" | "running" | "completed" | "failed" | "aborted";
@@ -25,19 +25,29 @@ export interface TeamCollaborationByMode {
 
 export interface TeamConfig {
 	models: TeamMemberConfig[];
+	reviewModels?: TeamMemberConfig[];
 	maxConcurrency: number;
-	autoSynthesize: boolean;
 	maxResultChars: number;
 	collaboration: TeamCollaborationByMode;
+}
+
+export type TeamActivityKind = "round" | "activity" | "retry" | "status" | "error";
+
+export interface TeamActivityEvent {
+	timestamp: number;
+	kind: TeamActivityKind;
+	text: string;
 }
 
 export interface TeamMemberSnapshot {
 	name: string;
 	model: string;
 	status: AgentStatus;
-	output: string;
 	error?: string;
-	logs: string[];
+	activity: readonly TeamActivityEvent[];
+	messages: readonly AgentMessage[];
+	liveMessage?: AgentMessage;
+	revision: number;
 }
 
 export interface TeamRunSnapshot {
@@ -45,6 +55,13 @@ export interface TeamRunSnapshot {
 	mode: TeamMode;
 	subject: string;
 	createdAt: string;
+	collaborationMode: TeamCollaborationMode;
+	currentRound: number;
+	totalRounds: number;
+	roundsCompleted: number;
+	maxConcurrency: number;
+	roundSources: readonly string[];
+	latestActivityMember?: string;
 	members: TeamMemberSnapshot[];
 }
 
@@ -53,6 +70,7 @@ export interface PersistedTeamMember {
 	status: AgentStatus;
 	sessionFile?: string;
 	error?: string;
+	activity?: TeamActivityEvent[];
 }
 
 export interface PersistedTeamRun {
@@ -61,11 +79,18 @@ export interface PersistedTeamRun {
 	mode: Exclude<TeamMode, "followup">;
 	subject: string;
 	createdAt: string;
+	cwd?: string;
+	gitCwd?: string;
+	reviewEvidencePath?: string;
+	reviewCheckoutPath?: string;
+	reviewPrTarget?: string;
+	reviewHeadRefOid?: string;
 	artifactDir: string;
 	maxConcurrency: number;
-	autoSynthesize: boolean;
 	maxResultChars: number;
 	collaboration?: TeamCollaborationConfig;
 	roundsCompleted?: number;
+	currentRound?: number;
+	roundSources?: string[];
 	members: PersistedTeamMember[];
 }

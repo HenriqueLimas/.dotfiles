@@ -7,6 +7,8 @@
 ```text
 /bora
 /bora <task>
+/bora create-handoff
+/bora create-handoff <optional focus>
 /bora followup <message>
 /bora followup
 /bora status
@@ -16,6 +18,12 @@
 
 Bare `/bora` delegates the latest non-empty assistant response from the active parent-session branch as the implementation task. The command itself authorizes delegation, so no confirmation is requested. If no suitable assistant response exists, Bora reports an error. An explicit `/bora <task>` always uses the provided task.
 
+## Babysat handoff workflow
+
+Use `/bora create-handoff` or `/bora create-handoff <optional focus>` to ask the current parent agent for an implementation-ready handoff brief. The parent may inspect the repository read-only, but the request prohibits implementation and repository modifications. Review or refine the resulting brief in the parent conversation, then run bare `/bora` yourself when it is ready. Refinements must reproduce the complete revised brief because bare `/bora` delegates only the latest assistant response.
+
+Bare `/bora` is the explicit approval and delegation step. `/bora create-handoff` returns the brief directly without asking whether to delegate it, and it never launches Luna automatically.
+
 The first command creates one child JSONL session under:
 
 ```text
@@ -24,7 +32,9 @@ The first command creates one child JSONL session under:
 
 Follow-ups reuse that child session, including after `/reload` or resuming the parent session once the previous child turn has settled. `/bora followup` without a message selects the latest non-empty assistant response, but only after TUI confirmation; use an explicit message in headless modes. Explicit tasks and follow-ups always win.
 
-`/bora status` opens a live, bordered view of the run, child session path, artifact directory, activity log, and bounded latest output. Use Ctrl+U and Ctrl+D to scroll the activity and output pane by eight lines at a time. Page Up and Page Down remain available as alternatives. `/bora abort` stops active work without deleting the child JSONL session. `/bora config` reports the resolved configuration path and values.
+`/bora status` opens a near-fullscreen live view. The task stays above the child transcript and starts on one line; use the configured expand binding (Ctrl+O by default) to toggle more of it without letting it take over the popup. Use Up/Down to scroll one transcript line, Option+Up/Option+Down or Page Up/Page Down to jump by a full visible page, and Option+Left/Option+Right to jump to the beginning or end.
+
+The popup renders the durable child-session transcript rather than a capped activity buffer. Prompts, assistant text, exposed thinking blocks, tool calls, tool results, retries, errors, completed responses, and the current streaming message remain inspectable after completion and after restoring the parent session. Providers may keep private reasoning hidden; the popup can only show thinking content delivered to pi. `/bora abort` stops active work without deleting the child JSONL session. `/bora config` reports the resolved configuration path and values.
 
 ## Configuration
 

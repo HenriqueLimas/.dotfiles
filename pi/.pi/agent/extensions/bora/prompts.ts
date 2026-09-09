@@ -19,6 +19,13 @@ ${task}
 Start by inspecting the relevant architecture and existing behavior. Make the smallest maintainable change that satisfies the task, then run relevant validation and report the result.`;
 }
 
+export function buildHandoffPrompt(focus?: string): string {
+	const requestedFocus = focus?.trim() ? `\n\nFocus: ${focus.trim()}` : "";
+	return `Create a handoff for Bora, an implementation subagent that needs to be babysat. Include enough concrete detail for Bora to make the change correctly: what to implement, relevant context and constraints, important files if known, and how to validate the result.
+
+You may inspect the repository read-only when needed, but do not implement or modify anything. Return only the handoff without asking for approval or offering to delegate it. If asked to revise it, return the complete updated handoff.${requestedFocus}`;
+}
+
 export function buildFollowupTask(message: string): string {
 	return `Follow-up from the parent session:
 
