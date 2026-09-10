@@ -53,3 +53,12 @@ export function resolveBoraTask(input: string, branch: readonly SessionEntry[]):
 	if (!parentMessage) throw new Error("No suitable non-empty parent assistant response exists for bare /bora");
 	return parentMessage;
 }
+
+export function resolveBoraFollowup(input: string, branch: readonly SessionEntry[]): string {
+	const explicitMessage = stripOuterQuotes(input);
+	if (explicitMessage) return explicitMessage;
+
+	const parentMessage = latestParentAssistantMessage(branch);
+	if (!parentMessage) throw new Error("No suitable non-empty parent assistant response exists for a follow-up");
+	return parentMessage;
+}

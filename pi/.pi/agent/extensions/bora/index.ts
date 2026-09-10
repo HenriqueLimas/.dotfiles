@@ -3,7 +3,6 @@ import { chmod, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir, SessionManager } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
 import {
 	ChildAgentSession,
 	classifyTerminalResult,
@@ -14,18 +13,18 @@ import {
 } from "../_shared/agent-session.ts";
 import { DEFAULT_BORA_MAX_RESULT_CHARS, getBoraConfigPath, loadBoraConfig } from "./config.ts";
 import { BORA_SYSTEM_PROMPT, buildFollowupTask, buildHandoffPrompt, buildInitialTask } from "./prompts.ts";
+import { buildBoraResultPublication, RESULT_MESSAGE } from "./publication.ts";
+import { renderBoraResult } from "./result-renderer.ts";
 import { BoraStatusPopup } from "./status-popup.ts";
-import { parseBoraCommand, resolveBoraTask, stripOuterQuotes } from "./command.ts";
+import { parseBoraCommand, resolveBoraFollowup, resolveBoraTask, stripOuterQuotes } from "./command.ts";
 import {
 	BORA_STATE_ENTRY,
 	isBoraWorking,
 	latestBoraRun,
-	latestParentAssistantMessage,
 	markInterruptedBoraRun,
 } from "./state.ts";
-import type { BoraActivityEvent, BoraActivityKind, BoraConfig, BoraResultDetails, BoraStatus, PersistedBoraRun } from "./types.ts";
+import type { BoraActivityEvent, BoraActivityKind, BoraConfig, BoraStatus, PersistedBoraRun } from "./types.ts";
 
-const RESULT_MESSAGE = "bora-results";
 const HERDR_BACKGROUND_WORK_EVENT = "herdr:background-work";
 const STATUS_KEY = "bora";
 const BORA_CHILD_RESOURCE_POLICY = {
@@ -295,30 +294,17 @@ export default function boraExtension(pi: ExtensionAPI) {
 		else updateUi();
 	}
 
-	function resultContent(run: BoraRun): string {
-		const body = run.error ? `Error: ${run.error}\n\n${run.output}` : run.output || "No response.";
-		return `Bora ${run.status} for: ${run.task}\n\nModel: ${run.resolvedModel ?? run.model}\n\n${body}`;
-	}
-
 	function publishResult(run: BoraRun): void {
 		if (!alive || currentRun !== run || run.suppressPublication) return;
-		const details: BoraResultDetails = {
-			version: 1,
+		const publication = buildBoraResultPublication({
 			id: run.id,
 			task: run.task,
 			model: run.resolvedModel ?? run.model,
 			status: run.status,
 			error: run.error,
-		};
-		pi.sendMessage(
-			{
-				customType: RESULT_MESSAGE,
-				content: resultContent(run),
-				display: true,
-				details,
-			},
-			{ deliverAs: "followUp", triggerTurn: false },
-		);
+			output: run.output,
+		});
+		pi.sendMessage(publication.message, publication.options);
 	}
 
 	async function executeTurn(run: BoraRun, prompt: string, projectTrusted: boolean): Promise<void> {
@@ -533,17 +519,7 @@ export default function boraExtension(pi: ExtensionAPI) {
 		updateUi();
 	}
 
-	pi.registerMessageRenderer(RESULT_MESSAGE, (message, { expanded, outputPad }, theme) => {
-		const details = message.details as BoraResultDetails | undefined;
-		if (!details) return undefined;
-		const color = details.status === "completed" ? "success" : "error";
-		let text = theme.fg("accent", theme.bold(`Bora ${details.status}`));
-		text += ` ${theme.fg("dim", details.model)} · ${theme.fg("muted", details.id)}`;
-		if (details.error) text += `\n${theme.fg("error", details.error)}`;
-		if (expanded && typeof message.content === "string") text += `\n\n${message.content}`;
-		else if (!expanded) text += `\n${theme.fg(color, "Expand to inspect Luna's response.")}`;
-		return new Text(text, outputPad, 0);
-	});
+	pi.registerMessageRenderer(RESULT_MESSAGE, renderBoraResult);
 
 	pi.on("session_start", (_event, ctx) => {
 		alive = true;
@@ -647,25 +623,8 @@ export default function boraExtension(pi: ExtensionAPI) {
 				}
 				if (action === "followup" || action === "follow-up") {
 					if (!currentRun) throw new Error("No Bora run to follow up");
-					let message = stripOuterQuotes(parsed.rest);
-					if (!message) {
-						if (!ctx.hasUI) {
-							throw new Error("Provide an explicit follow-up message without UI confirmation");
-						}
-						await ctx.waitForIdle();
-						const parentMessage = latestParentAssistantMessage(ctx.sessionManager.getBranch());
-						if (!parentMessage) throw new Error("No suitable non-empty parent assistant response exists for a follow-up");
-						const preview = parentMessage.replace(/\s+/g, " ").slice(0, 240);
-						const confirmed = await ctx.ui.confirm(
-							"Send latest parent response to Bora?",
-							`${preview}${parentMessage.length > 240 ? "…" : ""}`,
-						);
-						if (!confirmed) {
-							ctx.ui.notify("Bora follow-up canceled.", "info");
-							return;
-						}
-						message = parentMessage;
-					}
+					if (!stripOuterQuotes(parsed.rest)) await ctx.waitForIdle();
+					const message = resolveBoraFollowup(parsed.rest, ctx.sessionManager.getBranch());
 					await followup(message, ctx);
 					return;
 				}

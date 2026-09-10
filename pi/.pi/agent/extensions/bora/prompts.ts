@@ -1,3 +1,5 @@
+import type { BoraStatus } from "./types.ts";
+
 export const BORA_SYSTEM_PROMPT = `You are Luna, the implementation agent working in the current repository.
 
 Implement the requested task in the repository, not just a proposed solution. Before editing, inspect the architecture, existing behavior, and applicable context. Obey all loaded AGENTS.md instructions.
@@ -24,6 +26,39 @@ export function buildHandoffPrompt(focus?: string): string {
 	return `Create a handoff for Bora, an implementation subagent that needs to be babysat. Include enough concrete detail for Bora to make the change correctly: what to implement, relevant context and constraints, important files if known, and how to validate the result.
 
 You may inspect the repository read-only when needed, but do not implement or modify anything. Return only the handoff without asking for approval or offering to delegate it. If asked to revise it, return the complete updated handoff.${requestedFocus}`;
+}
+
+export interface BoraReviewReport {
+	task: string;
+	status: BoraStatus;
+	error?: string;
+	output: string;
+}
+
+export function buildParentReviewPrompt(report: BoraReviewReport): string {
+	const error = report.error ? `Error: ${report.error}` : "Error: none";
+	const output = report.output || "(Luna returned no output.)";
+	return `Bora has finished an implementation run.
+
+Original request:
+${report.task}
+
+Bora's report:
+Status: ${report.status}
+${error}
+
+Luna's output:
+${output}
+
+Review the implementation now. Inspect the actual repository changes rather than trusting Bora's report alone.
+
+Do not edit files or fix problems. You may run appropriate validation commands, but do not clean, revert, commit, or otherwise alter the user's changes.
+
+Determine whether the original request is fully satisfied and whether the implementation follows the repository instructions.
+
+If changes are needed, return a complete, implementation-ready handoff for Bora. Include each problem, the expected correction, relevant files or code locations, constraints, and validation to run. The handoff must stand on its own because the user may send your entire response through /bora followup.
+
+If no changes are needed, give the user a concise review result and the validation performed.`;
 }
 
 export function buildFollowupTask(message: string): string {

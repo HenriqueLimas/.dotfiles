@@ -24,13 +24,26 @@ Use `/bora create-handoff` or `/bora create-handoff <optional focus>` to ask the
 
 Bare `/bora` is the explicit approval and delegation step. `/bora create-handoff` returns the brief directly without asking whether to delegate it, and it never launches Luna automatically.
 
+## Review loop
+
+When Luna finishes, Bora sends a hidden review prompt to the parent and starts a parent-agent turn. The parent reviews the actual repository state without editing it. To send that review back to Luna, run bare `/bora followup`:
+
+```text
+/bora
+[parent review]
+/bora followup
+[parent review]
+```
+
+Bora never sends a follow-up automatically. Invoking bare `/bora followup` authorizes sending the latest parent response to Luna without another confirmation. Historical result cards stay compact; use `/bora status` to inspect the child transcript.
+
 The first command creates one child JSONL session under:
 
 ```text
 ~/.pi/agent/bora-sessions/<parent-session-id>/<run-id>/
 ```
 
-Follow-ups reuse that child session, including after `/reload` or resuming the parent session once the previous child turn has settled. `/bora followup` without a message selects the latest non-empty assistant response, but only after TUI confirmation; use an explicit message in headless modes. Explicit tasks and follow-ups always win.
+Follow-ups reuse that child session, including after `/reload` or resuming the parent session once the previous child turn has settled. `/bora followup` without a message selects the latest non-empty assistant response in both interactive and headless modes. An explicit follow-up message always wins.
 
 `/bora status` opens a near-fullscreen live view. The task stays above the child transcript and starts on one line; use the configured expand binding (Ctrl+O by default) to toggle more of it without letting it take over the popup. Use Up/Down to scroll one transcript line, Option+Up/Option+Down or Page Up/Page Down to jump by a full visible page, and Option+Left/Option+Right to jump to the beginning or end.
 

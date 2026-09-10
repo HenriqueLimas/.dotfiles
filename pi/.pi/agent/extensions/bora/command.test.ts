@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseBoraCommand, resolveBoraTask } from "./command.ts";
+import { parseBoraCommand, resolveBoraFollowup, resolveBoraTask } from "./command.ts";
 
 function userEntry(content: unknown, id: string) {
 	return {
@@ -59,5 +59,24 @@ test("bare /bora fails when no assistant response exists", () => {
 	assert.throws(
 		() => resolveBoraTask("  ", [userEntry("request", "user")]),
 		/No suitable non-empty parent assistant response exists for bare \/bora/,
+	);
+});
+
+test("bare /bora followup uses the latest non-empty assistant response", () => {
+	const branch = [assistantEntry([{ type: "text", text: "review handoff" }], "assistant")];
+
+	assert.equal(resolveBoraFollowup("", branch), "review handoff");
+});
+
+test("explicit /bora followup takes precedence over the assistant response", () => {
+	const branch = [assistantEntry([{ type: "text", text: "review handoff" }], "assistant")];
+
+	assert.equal(resolveBoraFollowup(' "targeted correction" ', branch), "targeted correction");
+});
+
+test("bare /bora followup fails when no assistant response exists", () => {
+	assert.throws(
+		() => resolveBoraFollowup("", [userEntry("request", "user")]),
+		/No suitable non-empty parent assistant response exists for a follow-up/,
 	);
 });
