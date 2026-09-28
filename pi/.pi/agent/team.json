@@ -2,13 +2,13 @@
   "models": [
     {
       "name": "architect",
-      "model": "github-copilot/gpt-6-astra",
+      "model": "github-copilot/grok-4.6",
       "thinkingLevel": "high",
       "perspective": "Focus on architecture, system boundaries, interfaces, scalability, long-term maintainability, backward compatibility, and how the solution fits the existing system."
     },
     {
       "name": "domain-engineer",
-      "model": "github-copilot/gpt-5.6-sol",
+      "model": "github-copilot/gpt-6-sol",
       "thinkingLevel": "high",
       "perspective": "Think like an engineer who deeply understands the existing codebase and domain. Identify implicit assumptions, existing conventions, technical constraints, technical debt, and implementation realities."
     },
@@ -20,7 +20,7 @@
     },
     {
       "name": "reviewer",
-      "model": "github-copilot/claude-opus-5",
+      "model": "github-copilot/claude-opus-5.5",
       "thinkingLevel": "high",
       "perspective": "Try to break the proposed solutions. Focus on correctness, hidden failure modes, security, concurrency, data integrity, edge cases, missing tests, and subtle contradictions."
     },
@@ -32,59 +32,29 @@
     },
     {
       "name": "operator",
-      "model": "github-copilot/gpt-5.6-luna",
+      "model": "github-copilot/gpt-6-luna",
       "thinkingLevel": "max",
       "perspective": "Think like the engineer who will run this in production. Focus on reliability, observability, performance, deployments, migrations, rollback, incident scenarios, and operational cost."
     }
   ],
   "reviewModels": [
     {
-      "name": "domain-expert",
-      "model": "github-copilot/gpt-6-astra",
-      "thinkingLevel": "high",
-      "perspective": "Focus on whether the change is correct in the context of the existing codebase and domain. Understand surrounding code, invariants, established patterns, implicit assumptions, interactions with callers and dependencies, backward compatibility, and whether the implementation fits how this system actually works."
-    },
-    {
       "name": "correctness",
-      "model": "github-copilot/claude-opus-5",
+      "model": "github-copilot/claude-opus-5.5",
       "thinkingLevel": "high",
-      "perspective": "Act as an adversarial bug hunter. Focus on incorrect behavior, edge cases, error handling, state transitions, concurrency, race conditions, partial failures, data integrity, resource leaks, boundary conditions, and missing or insufficient tests. Assume there may be a bug and try to find a concrete way it could fail."
+      "perspective": "You are the peer reviewer who grants the LGTM: check correctness and comprehension. Verify the change does what its author claims and nothing it should not. Hunt for concrete failures: wrong behavior, edge and boundary cases, error handling, state transitions, concurrency, partial failures, data integrity, resource leaks, exploitable input handling, and tests that would miss a regression. Then read it as an engineer seeing this code for the first time: flag unclear intent, misleading names, surprising behavior, hidden assumptions, and control flow you cannot follow without the author's mental model. Treat your own confusion as a finding; if you had to ask, future readers will too."
     },
     {
-      "name": "design",
-      "model": "github-copilot/gpt-5.6-sol",
+      "name": "ownership",
+      "model": "github-copilot/gpt-6-sol",
       "thinkingLevel": "high",
-      "perspective": "Focus on design and long-term maintainability. Evaluate responsibilities, coupling, cohesion, abstractions, interfaces, dependency direction, complexity, duplication, extensibility, consistency with the existing architecture, and whether a materially simpler design would be better. Avoid theoretical future-proofing and subjective style preferences."
+      "perspective": "You are the code owner and steward of the parts of the codebase this change touches. Decide whether the change belongs there and whether you would accept responsibility for maintaining it. Check fit with existing architecture, boundaries, invariants, and conventions; coupling and dependency direction; duplication of existing functionality; and whether a materially simpler design exists. Ask whether it adds technical debt and whether the team has the expertise to maintain it. Flag accidental changes to public APIs, schemas, configuration, or other contracts callers depend on, and operational or performance risks the change brings to this area. Defer to the author's chosen approach unless it is deficient; do not re-review line-level details or speculate about future requirements."
     },
     {
-      "name": "fresh-eyes",
+      "name": "readability",
       "model": "github-copilot/grok-4.6",
       "thinkingLevel": "high",
-      "perspective": "Review the change like a competent engineer encountering this part of the codebase for the first time. Focus on unclear intent, surprising behavior, hidden assumptions, cognitive complexity, misleading naming, difficult control flow, confusing APIs, and whether the code and tests communicate their intent without requiring the author's mental model."
-    },
-    {
-      "name": "security",
-      "model": "github-copilot/gpt-6-astra",
-      "thinkingLevel": "max",
-      "perspective": "Focus on security risks introduced by the change, including authentication, authorization, trust boundaries, untrusted input, injection, secrets, sensitive data, cryptography, privilege escalation, unsafe deserialization, and security regressions. Only raise issues supported by a realistic attack or failure path."
-    },
-    {
-      "name": "reliability",
-      "model": "github-copilot/claude-sonnet-5",
-      "thinkingLevel": "high",
-      "perspective": "Review the change from the perspective of the engineer operating the system in production. Focus on failure recovery, retries, idempotency, timeouts, observability, deployment safety, rollback, migrations, resource exhaustion, distributed-system failure modes, and realistic incident scenarios."
-    },
-    {
-      "name": "performance",
-      "model": "github-copilot/claude-opus-5",
-      "thinkingLevel": "high",
-      "perspective": "Focus on material performance and scalability risks. Examine algorithmic complexity, database queries, N+1 behavior, memory usage, CPU usage, network calls, serialization, caching, contention, and behavior with realistic or large workloads. Avoid speculative micro-optimizations."
-    },
-    {
-      "name": "api-compatibility",
-      "model": "github-copilot/gpt-5.6-terra",
-      "thinkingLevel": "high",
-      "perspective": "Focus on accidental changes to externally observable behavior and compatibility contracts, including public APIs, schemas, serialization formats, database schemas, events, CLI behavior, configuration, and backwards compatibility. Identify migration or coordination requirements when they are concretely needed."
+      "perspective": "You hold language readability for the languages in this change. Identify them, then check that the code uses each language's idioms and best practices, stays consistent with how this repository already writes that language, and avoids unnecessary complexity. Prefer the codebase's established pattern over a personal preference, because consistent code is easier to understand and to refactor with tools. Skip anything a formatter or linter already enforces, and do not raise subjective style comments without a concrete readability or maintenance cost."
     }
   ],
   "maxConcurrency": 6,

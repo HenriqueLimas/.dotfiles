@@ -18,7 +18,6 @@ import {
 } from "./prompts.ts";
 import { calculateTeamProgress, formatWorkingProgress, type TeamProgress } from "./progress.ts";
 import { TeamWorkingWidget } from "./working-widget.ts";
-import { determineReviewScope, selectReviewMembers, type ReviewScope } from "./review.ts";
 import { preparePullRequestCheckout } from "./pr-checkout.ts";
 import {
 	ChildAgentSession,
@@ -90,7 +89,6 @@ interface TeamRun {
 interface ReviewInput {
 	subject: string;
 	evidence: string;
-	scope: ReviewScope;
 	prTarget?: string;
 	headRefOid?: string;
 }
@@ -678,27 +676,18 @@ export default function teamExtension(pi: ExtensionAPI) {
 		return output;
 	}
 
-	function parseChangedFileList(output: string): string[] {
-		return output
-			.split("\n")
-			.map((line) => line.trim())
-			.filter(Boolean);
-	}
-
-	function parsePullRequestMetadata(metadata: string): { files: string[]; number?: number; headRefOid?: string } {
+	function parsePullRequestMetadata(metadata: string): { number?: number; headRefOid?: string } {
 		try {
 			const value = JSON.parse(metadata) as {
-				files?: Array<{ path?: unknown }>;
 				number?: unknown;
 				headRefOid?: unknown;
 			};
 			return {
-				files: (value.files ?? []).flatMap((file) => (typeof file.path === "string" ? [file.path] : [])),
 				number: typeof value.number === "number" ? value.number : undefined,
 				headRefOid: typeof value.headRefOid === "string" ? value.headRefOid : undefined,
 			};
 		} catch {
-			return { files: [] };
+			return {};
 		}
 	}
 
@@ -708,7 +697,6 @@ export default function teamExtension(pi: ExtensionAPI) {
 		let rest = stripOuterQuotes(first.rest);
 		let subject: string;
 		let evidence: string;
-		let changedFiles: string[] = [];
 		let prTarget: string | undefined;
 		let headRefOid: string | undefined;
 
@@ -718,10 +706,7 @@ export default function teamExtension(pi: ExtensionAPI) {
 				captureCommand("git", ["status", "--short"], ctx.cwd),
 				captureCommand("git", ["diff", "--no-ext-diff", "--unified=80"], ctx.cwd),
 				captureCommand("git", ["diff", "--cached", "--no-ext-diff", "--unified=80"], ctx.cwd),
-				captureCommand("git", ["diff", "--no-ext-diff", "--name-only"], ctx.cwd),
-				captureCommand("git", ["diff", "--cached", "--no-ext-diff", "--name-only"], ctx.cwd),
 			]);
-			changedFiles = [...parseChangedFileList(parts[3]), ...parseChangedFileList(parts[4])];
 			subject = `uncommitted code${rest ? `, focus: ${rest}` : ""}`;
 			evidence = `# Git status\n\n\`\`\`text\n${parts[0]}\n\`\`\`\n\n# Unstaged diff\n\n\`\`\`diff\n${parts[1]}\n\`\`\`\n\n# Staged diff\n\n\`\`\`diff\n${parts[2]}\n\`\`\``;
 		} else if (kind === "pr" || kind === "pull-request" || kind === "pullrequest") {
@@ -734,7 +719,6 @@ export default function teamExtension(pi: ExtensionAPI) {
 			]);
 			const pullRequest = parsePullRequestMetadata(metadata);
 			if (!pullRequest.headRefOid) throw new Error("GitHub did not return the PR head commit; refusing to review the current checkout");
-			changedFiles = pullRequest.files;
 			prTarget = target || (pullRequest.number === undefined ? undefined : String(pullRequest.number));
 			headRefOid = pullRequest.headRefOid;
 			subject = `pull request ${target || "for the current branch"}${targetArg.rest ? `, focus: ${stripOuterQuotes(targetArg.rest)}` : ""}`;
@@ -743,11 +727,7 @@ export default function teamExtension(pi: ExtensionAPI) {
 			if (rest.toLowerCase() === "code" || rest.toLowerCase().startsWith("code ")) rest = rest.slice(4).trimStart();
 			const targetArg = takeFirstArgument(rest);
 			const target = targetArg.value || "HEAD";
-			const [patch, files] = await Promise.all([
-				captureCommand("git", ["show", "--stat", "--patch", "--find-renames", target], ctx.cwd),
-				captureCommand("git", ["show", "--format=", "--name-only", "--find-renames", target], ctx.cwd),
-			]);
-			changedFiles = parseChangedFileList(files);
+			const patch = await captureCommand("git", ["show", "--stat", "--patch", "--find-renames", target], ctx.cwd);
 			subject = `commit ${target}${targetArg.rest ? `, focus: ${stripOuterQuotes(targetArg.rest)}` : ""}`;
 			evidence = `# Commit ${target}\n\n\`\`\`diff\n${patch}\n\`\`\``;
 		} else if (kind === "plan") {
@@ -767,8 +747,7 @@ export default function teamExtension(pi: ExtensionAPI) {
 			throw new Error("Review target must be uncommitted, pr, commit, or plan");
 		}
 
-		const scope = determineReviewScope(changedFiles, evidence);
-		return { subject, evidence, scope, prTarget, headRefOid };
+		return { subject, evidence, prTarget, headRefOid };
 	}
 
 	async function showDashboard(ctx: ExtensionContext): Promise<void> {
@@ -1027,13 +1006,6 @@ export default function teamExtension(pi: ExtensionAPI) {
 						const review = await prepareReview(collaboration.rest, ctx);
 						const evidencePath = join(preparationDir, "review-evidence.md");
 						await writeFile(evidencePath, review.evidence, { encoding: "utf8", mode: 0o600 });
-						const reviewMembers = config.reviewModels
-							? selectReviewMembers(config.reviewModels, review.scope)
-							: undefined;
-						if (config.reviewModels && !reviewMembers?.length) {
-							throw new Error("reviewModels must include at least one default or relevant specialist reviewer");
-						}
-
 						let checkoutPath: string | undefined;
 						try {
 							if (review.headRefOid) {
@@ -1063,10 +1035,9 @@ export default function teamExtension(pi: ExtensionAPI) {
 									reviewHeadRefOid: review.headRefOid,
 								},
 								collaboration.mode,
-								reviewMembers,
+								config.reviewModels,
 							);
-							const specialists = review.scope.specialists.length ? ` Specialists: ${review.scope.specialists.join(", ")}.` : "";
-							ctx.ui.notify(`Team ${run.id} started (${review.scope.risk}-risk review).${specialists} Review snapshot: ${evidencePath}`, "info");
+							ctx.ui.notify(`Team ${run.id} started. Review snapshot: ${evidencePath}`, "info");
 						} catch (error) {
 							if (checkoutPath) {
 								try {

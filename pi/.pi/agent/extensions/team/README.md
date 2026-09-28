@@ -1,6 +1,6 @@
 # Team extension
 
-`/team` runs a panel of pi agents. Each panelist uses its own model and persistent session. Panels can answer independently or use bounded roundtable rounds where members critique their peers before the parent session synthesizes their final positions. PR reviews use a separate roster when `reviewModels` is configured. The four default reviewers work independently, relevant specialists are selected from the changed files and patch, and the parent agent merges their findings into the final review.
+`/team` runs a panel of pi agents. Each panelist uses its own model and persistent session. Panels can answer independently or use bounded roundtable rounds where members critique their peers before the parent session synthesizes their final positions. PR reviews use a separate roster when `reviewModels` is configured. Every reviewer in that roster works independently, and the parent agent merges their findings into the final review.
 
 ## Commands
 
@@ -43,10 +43,10 @@ Edit `~/.pi/agent/team.json` and run another `/team` command. The extension read
   ],
   "reviewModels": [
     {
-      "name": "domain-expert",
+      "name": "ownership",
       "model": "openai-codex/gpt-5.6-sol",
       "thinkingLevel": "high",
-      "perspective": "Focus on the change in the context of the existing codebase and domain."
+      "perspective": "Decide whether the change belongs in this part of the codebase and is maintainable."
     }
   ],
   "maxConcurrency": 3,
@@ -66,7 +66,9 @@ Edit `~/.pi/agent/team.json` and run another `/team` command. The extension read
 }
 ```
 
-Model references use pi's `provider/model` syntax and may include a thinking suffix. Each member name must be unique. `reviewModels` uses the same member object shape as `models`. Its standard roster contains `domain-expert`, `correctness`, `design`, `fresh-eyes`, `security`, `reliability`, `performance`, and `api-compatibility`. The first four are always selected, and the four specialists run only when the changed paths or patch indicate that their area is relevant. The parent always synthesizes the reviewer responses. If `reviewModels` is omitted, reviews retain the legacy `models` roster.
+Model references use pi's `provider/model` syntax and may include a thinking suffix. Each member name must be unique. `reviewModels` uses the same member object shape as `models`, and every entry runs on every review; the file is the only source of truth for the review roster. The default roster follows the three approvals in [Software Engineering at Google, chapter 9](https://abseil.io/resources/swe-book/html/ch09.html): `correctness` (correctness and comprehension), `ownership` (the change fits and can be maintained in this part of the codebase), and `readability` (language idioms and consistency). The parent always synthesizes the reviewer responses. If `reviewModels` is omitted, reviews retain the legacy `models` roster.
+
+Every review model also receives guidance drawn from the chapter's [Code Review Best Practices](https://abseil.io/resources/swe-book/html/ch09.html#code-review-best-practices). Reviewers keep feedback professional, ask about unclear choices before assuming a mistake, defer to sound author preferences, check that a change and its description are focused and understandable, and use automated checks for mechanical issues. They report a concrete cost when scope or size makes a change hard to review; there is no fixed line limit. The parent applies the same standard when it consolidates findings.
 
 After every panel round, the extension sends the raw responses to the parent agent and starts a synthesis turn. PR review uses a dedicated parent prompt that validates findings against the PR-head checkout, merges duplicates, resolves disagreements, filters severity and confidence, and returns the final review. Raw responses remain inspectable, but they are never delivered as the final review. The parent explicitly loads the global `unslop` skill and applies it while preserving the panel's technical meaning.
 
