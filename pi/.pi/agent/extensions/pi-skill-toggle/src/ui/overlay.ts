@@ -3,7 +3,7 @@ import { Key, matchesKey, type TUI } from "@earendil-works/pi-tui";
 import type { SkillInvocationMode, SkillRecord, SkillToggleUiResult } from "../types.ts";
 import { formatSourceKind } from "../inventory/classifier.ts";
 import { bottomBorder, combineColumns, divider, fit, frameLine, topBorder } from "./render.ts";
-import { filterSkills, modeLabel, toggleMode } from "./view-model.ts";
+import { defaultDesiredMode, filterSkills, modeLabel, toggleMode } from "./view-model.ts";
 
 export async function showSkillToggleUi(ctx: ExtensionContext, skills: SkillRecord[]): Promise<SkillToggleUiResult> {
   return ctx.ui.custom<SkillToggleUiResult>(
@@ -31,7 +31,7 @@ class SkillToggleOverlay {
     private readonly skills: SkillRecord[],
     private readonly done: (result: SkillToggleUiResult) => void,
   ) {
-    for (const skill of skills) this.desired.set(skill.id, skill.mode);
+    for (const skill of skills) this.desired.set(skill.id, defaultDesiredMode(skill));
   }
 
   handleInput(data: string): void {

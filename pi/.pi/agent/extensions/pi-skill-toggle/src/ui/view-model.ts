@@ -9,6 +9,11 @@ export function toggleMode(mode: SkillInvocationMode): SkillInvocationMode {
   return mode === "manual-only" ? "agent-invocable" : "manual-only";
 }
 
+export function defaultDesiredMode(skill: SkillRecord): SkillInvocationMode {
+  if (!skill.editable) return skill.mode;
+  return skill.name === "unslop" ? "agent-invocable" : "manual-only";
+}
+
 export function skillSearchText(skill: SkillRecord): string {
   return [
     skill.name,
