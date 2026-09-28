@@ -20,7 +20,7 @@ Bare `/bora` delegates the latest non-empty assistant response from the active p
 
 ## Babysat handoff workflow
 
-Use `/bora create-handoff` or `/bora create-handoff <optional focus>` to ask the current parent agent for an implementation-ready handoff brief. The parent may inspect the repository read-only, but the request prohibits implementation and repository modifications. Review or refine the resulting brief in the parent conversation, then run bare `/bora` yourself when it is ready. Refinements must reproduce the complete revised brief because bare `/bora` delegates only the latest assistant response.
+Use `/bora create-handoff` or `/bora create-handoff <optional focus>` to ask the current parent agent for an implementation-ready handoff brief. The parent builds the brief from what the conversation already established and inspects the repository read-only only to fill a specific gap, because Luna explores the code itself. The brief asks for acceptance criteria and exact paths, symbols, and validation commands so Luna does not have to search for them. The request prohibits implementation and repository modifications. Review or refine the resulting brief in the parent conversation, then run bare `/bora` yourself when it is ready. Refinements must reproduce the complete revised brief because bare `/bora` delegates only the latest assistant response.
 
 Bare `/bora` is the explicit approval and delegation step. `/bora create-handoff` returns the brief directly without asking whether to delegate it, and it never launches Luna automatically.
 
@@ -36,6 +36,16 @@ When Luna finishes, Bora sends a hidden review prompt to the parent and starts a
 ```
 
 Bora never sends a follow-up automatically. Invoking bare `/bora followup` authorizes sending the latest parent response to Luna without another confirmation. Historical result cards stay compact; use `/bora status` to inspect the child transcript.
+
+## Review evidence
+
+Parent turns carry the whole parent conversation, so each tool call the parent makes during review costs far more than a Luna turn. Bora therefore collects review evidence itself and puts it in the review prompt:
+
+- Before each Luna turn, Bora snapshots the working tree, including untracked non-ignored files, as a git tree object. It uses a temporary index, so the user's index, stash, and files stay untouched. The only side effect is unreferenced git objects, which `git gc` prunes.
+- After the turn, Bora diffs that snapshot against a new one. The parent gets `git diff --stat` for changes made during this turn only, so work that already existed in the tree is excluded. The full patch is inlined up to 8000 characters. Above that the parent gets only the stat and reads the files it needs.
+- Luna ends every turn with a fixed report: `Changed files`, `Validation`, `Deviations from the handoff`, and `Risks and open questions`. Bora checks each backticked command in `Validation` against the child's bash calls. It reports each command as passed, failed with an output tail, stale when `edit` or `write` ran afterwards, or not found in the transcript. It also counts failed bash calls Luna did not report.
+
+The review prompt tells the parent to start from this evidence and not rerun validation that passed and is not stale. The evidence has limits. Staleness only notices `edit` and `write` calls, not files changed by bash commands. Changes made by other processes during the turn appear in the diff. Outside a git repository, or when git fails, Bora says the evidence is unavailable and the parent inspects the repository directly.
 
 The first command creates one child JSONL session under:
 

@@ -9,9 +9,11 @@ import {
 	createChildAgentSession,
 	DEFAULT_CHILD_RESOURCE_POLICY,
 	IMPLEMENTATION_TOOLS,
+	latestAssistant,
 	textFromAssistant,
 } from "../_shared/agent-session.ts";
 import { DEFAULT_BORA_MAX_RESULT_CHARS, getBoraConfigPath, loadBoraConfig } from "./config.ts";
+import { captureTurnBaseline, collectTurnEvidence, renderTurnEvidence } from "./evidence.ts";
 import { BORA_SYSTEM_PROMPT, buildFollowupTask, buildHandoffPrompt, buildInitialTask } from "./prompts.ts";
 import { buildBoraResultPublication, RESULT_MESSAGE } from "./publication.ts";
 import { renderBoraResult } from "./result-renderer.ts";
@@ -56,6 +58,10 @@ interface BoraRun {
 	suppressPublication: boolean;
 	uiCleared: boolean;
 	backgroundWorkId?: string;
+	/** Increments per turn so late evidence from an older turn is never published. */
+	turn: number;
+	/** Rendered evidence for the latest finished turn; transient, the parent message keeps it. */
+	evidence?: string;
 }
 
 function formatError(error: unknown): string {
@@ -117,6 +123,7 @@ function runFromPersisted(data: PersistedBoraRun, interrupted = false): BoraRun 
 		abortRequested: false,
 		suppressPublication: false,
 		uiCleared: false,
+		turn: 0,
 	};
 }
 
@@ -303,14 +310,17 @@ export default function boraExtension(pi: ExtensionAPI) {
 			status: run.status,
 			error: run.error,
 			output: run.output,
+			evidence: run.evidence,
 		});
 		pi.sendMessage(publication.message, publication.options);
 	}
 
 	async function executeTurn(run: BoraRun, prompt: string, projectTrusted: boolean): Promise<void> {
 		if (!alive || currentRun !== run || run.abortRequested) return;
+		const turn = ++run.turn;
 		run.status = "running";
 		run.error = undefined;
+		run.evidence = undefined;
 		run.liveMessage = undefined;
 		run.phase = "starting";
 		run.uiCleared = false;
@@ -319,9 +329,17 @@ export default function boraExtension(pi: ExtensionAPI) {
 		persistCurrentRun(run);
 		updateUi();
 
+		let baseline: Awaited<ReturnType<typeof captureTurnBaseline>> | undefined;
+		let turnStart: number | undefined;
 		try {
 			const child = await ensureChild(run, projectTrusted);
 			if (!alive || currentRun !== run || run.abortRequested) return;
+			run.phase = "snapshot";
+			updateUi();
+			baseline = await captureTurnBaseline(run.cwd);
+			if (!alive || currentRun !== run || run.abortRequested) return;
+			// Taken after ensureChild, which reloads run.messages from the child JSONL.
+			turnStart = run.messages.length;
 			await child.session.prompt(prompt, { expandPromptTemplates: false });
 			if (!alive || currentRun !== run || run.abortRequested) return;
 
@@ -340,7 +358,16 @@ export default function boraExtension(pi: ExtensionAPI) {
 			}
 			run.liveMessage = undefined;
 		} finally {
-			if (!alive || currentRun !== run) return;
+			if (alive && currentRun === run && run.turn === turn && !run.suppressPublication && turnStart !== undefined) {
+				run.phase = "collecting evidence";
+				updateUi();
+				const turnMessages = run.messages.slice(turnStart);
+				// Parse this turn's own report; run.output can still hold the previous turn's report on failure.
+				const report = textFromAssistant(latestAssistant({ messages: turnMessages }));
+				const evidence = await collectTurnEvidence(baseline, turnMessages, report);
+				run.evidence = renderTurnEvidence(evidence);
+			}
+			if (!alive || currentRun !== run || run.turn !== turn) return;
 			run.phase = undefined;
 			persistCurrentRun(run);
 			finishBackgroundWork(run);
@@ -392,6 +419,7 @@ export default function boraExtension(pi: ExtensionAPI) {
 			abortRequested: false,
 			suppressPublication: false,
 			uiCleared: false,
+			turn: 0,
 		};
 
 		// Session creation performs model resolution and auth validation before any prompt starts.

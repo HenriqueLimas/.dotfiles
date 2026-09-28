@@ -28,6 +28,19 @@ test("Bora publishes a hidden parent review follow-up", () => {
 	assert.match(publication.message.content, /The implementation is complete/);
 });
 
+test("Bora includes rendered evidence in the parent review but not in the result card details", () => {
+	const publication = buildBoraResultPublication({
+		id: "run-3",
+		task: "Fix it",
+		model: "provider/luna",
+		status: "completed",
+		output: "Done",
+		evidence: "Working-tree changes during this turn: none.",
+	});
+	assert.match(publication.message.content, /Working-tree changes during this turn: none\./);
+	assert.equal("evidence" in publication.message.details, false);
+});
+
 test("Bora retains failed result details in the parent review publication", () => {
 	const publication = buildBoraResultPublication({
 		id: "run-2",

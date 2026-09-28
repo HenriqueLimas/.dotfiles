@@ -10,6 +10,8 @@ export interface BoraPublicationRun {
 	status: BoraStatus;
 	error?: string;
 	output: string;
+	/** Rendered turn evidence; omitted when collection was skipped. */
+	evidence?: string;
 }
 
 export interface BoraResultPublication {
@@ -34,6 +36,7 @@ export function buildBoraResultPublication(run: BoraPublicationRun): BoraResultP
 				status: run.status,
 				error: run.error,
 				output: run.output,
+				evidence: run.evidence,
 			}),
 			display: false,
 			details: {
