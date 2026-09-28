@@ -19,6 +19,7 @@ import {
 import { calculateTeamProgress, formatWorkingProgress, type TeamProgress } from "./progress.ts";
 import { TeamWorkingWidget } from "./working-widget.ts";
 import { preparePullRequestCheckout } from "./pr-checkout.ts";
+import { neutralizeControlCharacters } from "./evidence.ts";
 import {
 	ChildAgentSession,
 	classifyTerminalResult,
@@ -715,7 +716,7 @@ export default function teamExtension(pi: ExtensionAPI) {
 			const ghTarget = target ? [target] : [];
 			const [metadata, diff] = await Promise.all([
 				captureCommand("gh", ["pr", "view", ...ghTarget, "--json", "number,title,body,url,baseRefName,headRefName,headRefOid,files"], ctx.cwd),
-				captureCommand("gh", ["pr", "diff", ...ghTarget], ctx.cwd),
+				captureCommand("gh", ["pr", "diff", ...ghTarget, "--allow-escape-sequences"], ctx.cwd),
 			]);
 			const pullRequest = parsePullRequestMetadata(metadata);
 			if (!pullRequest.headRefOid) throw new Error("GitHub did not return the PR head commit; refusing to review the current checkout");
@@ -747,7 +748,14 @@ export default function teamExtension(pi: ExtensionAPI) {
 			throw new Error("Review target must be uncommitted, pr, commit, or plan");
 		}
 
-		return { subject, evidence, prTarget, headRefOid };
+		// gh refuses piped diffs with escape sequences unless allowed, and git never
+		// filters them, so neutralize every review input once here.
+		return {
+			subject: neutralizeControlCharacters(subject),
+			evidence: neutralizeControlCharacters(evidence),
+			prTarget,
+			headRefOid,
+		};
 	}
 
 	async function showDashboard(ctx: ExtensionContext): Promise<void> {
