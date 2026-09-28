@@ -60,6 +60,14 @@ class WorktreeRecord:
     branch: str
 
 
+@dataclass(frozen=True)
+class SourcePreparation:
+    """The normal checkout and whether this run created it."""
+
+    path: Path
+    created: bool
+
+
 def hosts() -> tuple[Host, Host]:
     return (
         Host(
@@ -1049,6 +1057,21 @@ def parse_worktree_list(output: str) -> list[dict[str, str | bool]]:
     return entries
 
 
+def common_git_directory(source: Path) -> Path | None:
+    value = git_output(
+        source,
+        "rev-parse",
+        "--git-common-dir",
+        check=False,
+    )
+    if not value:
+        return None
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = source / path
+    return path.resolve()
+
+
 def default_branch_for_source(source: Path, fallback: str = "main") -> str:
     symbolic = git_output(
         source,
@@ -1060,11 +1083,13 @@ def default_branch_for_source(source: Path, fallback: str = "main") -> str:
     )
     if symbolic.startswith("origin/"):
         return symbolic.removeprefix("origin/")
-    if git_output(
-        source, "rev-parse", "--is-bare-repository", check=False
+
+    common_dir = common_git_directory(source)
+    if common_dir and git_output(
+        common_dir, "rev-parse", "--is-bare-repository", check=False
     ) == "true":
         symbolic = git_output(
-            source,
+            common_dir,
             "symbolic-ref",
             "--quiet",
             "--short",
@@ -1093,7 +1118,7 @@ def remote_default_branch(source: Path, fallback: str = "main") -> str:
 
 
 def repository_sources(host: Host) -> list[Path]:
-    """Return normal repositories and manager-owned bare repositories."""
+    """Return normal repositories and legacy manager-owned bare repositories."""
 
     if not host.root.is_dir():
         return []
@@ -1102,18 +1127,17 @@ def repository_sources(host: Host) -> list[Path]:
     for candidate in host.root.iterdir():
         if candidate.name == ".herdr" or not candidate.is_dir():
             continue
-        if (candidate / ".git").exists():
+        if (candidate / ".git").is_dir():
             direct.append(candidate)
             continue
         nested = sorted(
             (
                 path
                 for path in candidate.iterdir()
-                if path.is_dir() and (path / ".git").exists()
+                if path.is_dir() and (path / ".git").is_dir()
             ),
             key=lambda path: (
                 0 if path.name == "main" else 1,
-                0 if (path / ".git").is_dir() else 1,
                 path.name.casefold(),
             ),
         )
@@ -1121,7 +1145,6 @@ def repository_sources(host: Host) -> list[Path]:
             direct.append(nested[0])
     direct.sort(
         key=lambda path: (
-            0 if (path / ".git").is_dir() else 1,
             path.parent.name.casefold(),
             path.name.casefold(),
         )
@@ -1151,30 +1174,32 @@ def worktrees_for_source(
             check=False,
         )
     )
+    valid_entries: list[tuple[dict[str, str | bool], Path]] = []
+    for entry in entries:
+        entry_path = entry.get("path")
+        if not entry_path:
+            continue
+        path = Path(str(entry_path)).expanduser().resolve()
+        if not path.is_dir() or not (path / ".git").exists():
+            continue
+        valid_entries.append((entry, path))
+
     default_branch = default_branch_for_source(source, "")
-    primary = next(
-        (
-            entry
-            for entry in entries
-            if not entry.get("bare")
-            and entry.get("path")
-            and default_branch
-            and entry.get("branch") == default_branch
-        ),
-        None,
-    ) or next(
-        (
-            entry
-            for entry in entries
-            if not entry.get("bare") and entry.get("path")
-        ),
-        None,
+    primary = (
+        next(
+            (
+                item
+                for item in valid_entries
+                if default_branch and item[0].get("branch") == default_branch
+            ),
+            None,
+        )
+        if default_branch
+        else (valid_entries[0] if valid_entries else None)
     )
-    source_path = (
-        Path(str(primary["path"])).expanduser().resolve()
-        if primary
-        else source.resolve()
-    )
+    if primary is None:
+        return []
+    source_path = primary[1]
     remote = git_output(
         source,
         "remote",
@@ -1192,12 +1217,7 @@ def worktrees_for_source(
         repo_host = storage_host
 
     records: list[WorktreeRecord] = []
-    for entry in entries:
-        if entry.get("bare"):
-            continue
-        path = Path(str(entry["path"])).expanduser().resolve()
-        if not path.is_dir():
-            continue
+    for entry, path in valid_entries:
         worktree_host = next(
             (
                 host
@@ -1366,16 +1386,41 @@ def worktree_sort_key(
 
 
 def find_existing_source(
-    host: Host, full_name: str, *, hostname: str | None = None
+    host: Host,
+    full_name: str,
+    *,
+    hostname: str | None = None,
+    default_branch: str | None = None,
 ) -> Path | None:
     if not host.root.is_dir():
         return None
-    target = ((hostname or host.hostname).lower(), full_name.lower())
-    for candidate in host.root.iterdir():
-        if candidate.name == ".herdr" or not candidate.is_dir():
+    target = ((hostname or host.hostname).casefold(), full_name.casefold())
+    candidates: list[Path] = []
+    for workspace in host.root.iterdir():
+        if workspace.name == ".herdr" or not workspace.is_dir():
             continue
-        if not (candidate / ".git").exists():
+        if (workspace / ".git").is_dir():
+            candidates.append(workspace)
             continue
+        candidates.extend(
+            path
+            for path in workspace.iterdir()
+            if path.is_dir() and (path / ".git").is_dir()
+        )
+
+    candidates.sort(
+        key=lambda path: (
+            0
+            if default_branch
+            and path.parent != host.root
+            and path.name == default_branch
+            else 1,
+            0 if path.parent == host.root else 1,
+            path.parent.name.casefold(),
+            path.name.casefold(),
+        )
+    )
+    for candidate in candidates:
         remote = git_output(
             candidate, "remote", "get-url", "origin", check=False
         )
@@ -1384,11 +1429,68 @@ def find_existing_source(
     return None
 
 
+def matching_legacy_cache(host: Host, repo: dict[str, Any]) -> Path | None:
+    """Find the old bare cache without changing or adopting it."""
+
+    cache = (
+        host.root
+        / ".herdr"
+        / "repositories"
+        / f"{repo_dir_name(repo['full_name'])}.git"
+    )
+    if not cache.is_dir() or not (cache / "HEAD").exists():
+        return None
+    remote = git_output(cache, "remote", "get-url", "origin", check=False)
+    target = (
+        str(repo["hostname"]).casefold(),
+        str(repo["full_name"]).casefold(),
+    )
+    return cache if canonical_remote(remote) == target else None
+
+
+def legacy_cache_blocks_worktree(
+    cache: Path, destination: Path, branch: str
+) -> bool:
+    if destination.exists():
+        return True
+    destination = destination.resolve()
+    for entry in parse_worktree_list(
+        git_output(cache, "worktree", "list", "--porcelain", check=False)
+    ):
+        entry_path = entry.get("path")
+        if (
+            entry_path
+            and Path(str(entry_path)).expanduser().resolve() == destination
+        ):
+            return True
+        if entry.get("branch") == branch:
+            return True
+    return False
+
+
+def remove_created_source(source: Path) -> None:
+    """Remove only a checkout created by the current clone attempt."""
+
+    try:
+        if source.is_dir() and not source.is_symlink():
+            shutil.rmtree(source)
+        elif source.exists() or source.is_symlink():
+            source.unlink()
+        try:
+            source.parent.rmdir()
+        except OSError:
+            pass
+    except OSError:
+        # Preserve the original clone/setup error for the user.
+        pass
+
+
 def prepare_source(
     host: Host,
     repo: dict[str, Any],
     search_hosts: Sequence[Host] = (),
-) -> Path:
+    signing_key: str | None = None,
+) -> SourcePreparation:
     host.root.mkdir(parents=True, exist_ok=True)
     candidate_hosts = (
         host,
@@ -1399,18 +1501,43 @@ def prepare_source(
             candidate,
             repo["full_name"],
             hostname=repo["hostname"],
+            default_branch=str(repo["default_branch"]),
         )
         if existing:
-            return existing
+            return SourcePreparation(existing, False)
 
-    repositories_dir = host.root / ".herdr" / "repositories"
-    repositories_dir.mkdir(parents=True, exist_ok=True)
-    source = repositories_dir / f"{repo_dir_name(repo['full_name'])}.git"
-    created_cache = not source.exists()
-    if created_cache:
-        print(f"\nCloning {repo['full_name']}...", flush=True)
-        gh_env = dict(os.environ)
-        gh_env["GH_HOST"] = repo["hostname"]
+    default_branch = str(repo["default_branch"])
+    source = (
+        host.root
+        / repository_workspace_name(repo)
+        / default_branch
+    )
+    if repo.get("host_key") == "github" and signing_key is None:
+        raise WorkspaceError(
+            "A GitHub signing key must be selected before cloning "
+            f"{repo['full_name']}."
+        )
+    source.parent.mkdir(parents=True, exist_ok=True)
+    legacy_cache = matching_legacy_cache(host, repo)
+    if legacy_cache and legacy_cache_blocks_worktree(
+        legacy_cache, source, default_branch
+    ):
+        raise WorkspaceError(
+            "Legacy bare repository cache still has registered worktrees "
+            f"for {repo['full_name']}: {legacy_cache}\n"
+            "It conflicts with the requested default checkout. Remove the "
+            "legacy cache's worktrees and cache manually before retrying."
+        )
+    if source.exists():
+        raise WorkspaceError(
+            f"Clone destination already exists and is not a matching normal "
+            f"repository: {source}"
+        )
+
+    print(f"\nCloning {repo['full_name']}...", flush=True)
+    gh_env = dict(os.environ)
+    gh_env["GH_HOST"] = repo["hostname"]
+    try:
         run(
             [
                 GH,
@@ -1419,35 +1546,40 @@ def prepare_source(
                 repo["full_name"],
                 str(source),
                 "--",
-                "--bare",
                 "--single-branch",
                 "--branch",
-                str(repo["default_branch"]),
+                default_branch,
                 "--filter=blob:none",
                 "--no-tags",
             ],
             env=gh_env,
         )
-    elif not (source / "HEAD").exists():
-        raise WorkspaceError(
-            f"Repository cache is not a bare git repository: {source}"
+        if not (source / ".git").is_dir():
+            raise WorkspaceError(
+                f"GitHub clone did not create a normal checkout: {source}"
+            )
+        run(
+            [
+                GIT,
+                "-C",
+                str(source),
+                "config",
+                "remote.origin.fetch",
+                "+refs/heads/*:refs/remotes/origin/*",
+            ]
         )
-    run(
-        [
-            GIT,
-            "-C",
-            str(source),
-            "config",
-            "remote.origin.fetch",
-            "+refs/heads/*:refs/remotes/origin/*",
-        ]
-    )
-    if created_cache:
-        # Bare clones seed local branch refs. Managed worktrees instead create
-        # or reset those refs from an explicitly fetched origin branch.
-        for branch in local_branches(source):
-            git_output(source, "update-ref", "-d", f"refs/heads/{branch}")
-    return source
+        if repo.get("host_key") == "github":
+            # The key was selected before cloning, so a newly created source
+            # is fully configured before it can be returned or reused.
+            if signing_key is None:
+                raise WorkspaceError(
+                    "A GitHub signing key is required to configure the clone."
+                )
+            configure_github_worktree(source, source, signing_key)
+    except (Exception, KeyboardInterrupt):
+        remove_created_source(source)
+        raise
+    return SourcePreparation(source, True)
 
 
 def local_branches(source: Path) -> set[str]:
@@ -1857,6 +1989,7 @@ def create_new_worktree(
     storage_host: Host,
     branch_name: str | None = None,
     workspace_name: str | None = None,
+    signing_key: str | None = None,
 ) -> dict[str, Any]:
     """Create or check out one branch and open its repository workspace."""
 
@@ -1868,10 +2001,10 @@ def create_new_worktree(
 
     storage_host.root.mkdir(parents=True, exist_ok=True)
     workspace_name = workspace_name or repository_workspace_name(repo)
-    signing_key = ""
     if repo.get("host_key") == "github":
         require_commands(GPG)
-        signing_key = choose_gpg_signing_key(GITHUB_AUTHOR_EMAIL)
+        if signing_key is None:
+            signing_key = choose_gpg_signing_key(GITHUB_AUTHOR_EMAIL)
     source, default_branch = ensure_default_worktree(
         repo=repo,
         source=source,
@@ -1925,6 +2058,17 @@ def create_new_worktree(
     if not path_contains(storage_host.root, destination):
         raise WorkspaceError(
             f"Worktree path escapes the configured root: {destination}"
+        )
+    legacy_cache = matching_legacy_cache(storage_host, repo)
+    if legacy_cache and legacy_cache_blocks_worktree(
+        legacy_cache, destination, branch
+    ):
+        raise WorkspaceError(
+            "Legacy bare repository cache still has the requested worktree "
+            f"registered for {repo['full_name']}: {legacy_cache}\n"
+            f"Branch or destination: {branch} / {destination}\n"
+            "Remove the legacy cache's worktrees and cache manually before "
+            "retrying."
         )
     if destination.exists():
         raise WorkspaceError(
@@ -2025,12 +2169,28 @@ def create_workspace(all_hosts: Sequence[Host]) -> None:
     require_commands(GH, GIT)
     repo = choose_repository(all_hosts)
     selected_host = next(host for host in all_hosts if host.key == repo["host_key"])
-    source = prepare_source(selected_host, repo, all_hosts)
+    branch = prompt_text("Branch name").strip()
+    if not branch:
+        raise Cancelled
+    validate_branch_name(branch)
+    signing_key: str | None = None
+    if repo.get("host_key") == "github":
+        require_commands(GPG)
+        signing_key = choose_gpg_signing_key(GITHUB_AUTHOR_EMAIL)
+    prepared_source = prepare_source(
+        selected_host,
+        repo,
+        all_hosts,
+        signing_key=signing_key,
+    )
+    source = prepared_source.path
     storage_host = host_for_path(all_hosts, source, selected_host)
     create_new_worktree(
         repo=repo,
         source=source,
         storage_host=storage_host,
+        branch_name=branch,
+        signing_key=signing_key,
         workspace_name=workspace_name_for_path(
             storage_host, source, repo
         ),
